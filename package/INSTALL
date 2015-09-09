@@ -1,0 +1,77 @@
+A GenQuery package is provided to aid installation on Debian GNU/Linux.  For users of other
+systems, this file contains some notes on how to install the GenQuery software.
+
+We do not currently have the resources to maintain packages for other platforms
+or a generic installation script.  However I would welcome any offers of
+packages or improved installation notes if anyone is prepared to offer them.
+
+Please also see the guide.pdf ditributed with the package.
+
+Steps to install:
+
+1) Prerequisites
+
+To run the system for yourself you will need a web server capable of serving
+Perl CGI scripts. The recommended system is Debian GNU/Linux with Apache, for
+which a .deb package is available from the Bio-Linux package repository, but
+the software should run happily on any modern Unix and maybe even Windows (untested)
+if installed manually.  Genquery can connect to PostgreSQL and MySQL databases, and 
+should work on anything for which there is a DBI driver, but YMMV.
+
+For non-Debian systems, you will need to make sure you have the following:
+
+    * Perl 5.8
+    * A PostgreSQL/MySQL database to query (need not be on the same machine as GenQuery)
+    * A working web server (e.g. Apache) with CGI enabled
+    * These Perl modules, available from cpan.org:
+          o CGI
+          o DBD::Pg and/or DBD::mysql
+          o Text::CSV_XS (optional)
+          o IO::String
+	  o HTML::Template
+	  o CGI::Application
+	  o CGI::Application::Plugin::Forward
+	  o String::Tokenizer
+	  o XML::Simple
+	  o XML::Writer (optional)
+	  o YAML
+
+2) Install modules
+
+Inside the tarball there is a perl5 directory.  Copy the contents of this to somewhere in 
+your Perl module path - eg. /usr/local/lib/site_perl
+
+3) Install web content
+
+Inside the tarball there is a www directory.  Put these files in an appropriate
+location to be served by Apache.  The reccommended location is /var/www/genquery.
+
+*Note* - if you are setting up GenQuery for Handlebar then you can stop here.  Handlebar 
+ships with its own CGI scripts and configuration.
+
+There is also a cgi-bin directory.  The files from here need to go in a script-aliased
+web directory, typically /var/www/cgi-bin/genquery.
+
+4) Setup database
+
+If you want to add queries to the database, rather than storing them in the external 
+configuration file, run the inlcuded make_tables.sql file from the share directory to 
+create the required tables in your database.  
+
+5) Configure
+
+Copy the templates and sample configuration file from the conf directory to, for example, 
+/etc/handlebar.
+
+Copy the sample configuration file and edit your copy to suit your needs - for example you can set the database 
+to query and change default file locations.
+GenQuery is run from the stub CGI script 'gq.cgi' which you have already copied to the cgi-bin directory;
+edit this script to point to your new configuration file.
+
+See the comments in both files, as well as the guide document, for more details.
+
+5) Try it - point a browser at http://localhost/cgi-bin/genquery/gq.cgi
+
+This should be sufficient to get going, but due to the large range of possible configurations I cannot
+provide exhaustive instructions, so you may have to apply some cunning.  Good luck!
+

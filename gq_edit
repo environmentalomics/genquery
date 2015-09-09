@@ -1,0 +1,941 @@
+#!/usr/bin/perl
+#
+# GQ-Edit : A command-line tool for editing the data stored in the
+#           GenQuery query_defs and query_params tables.
+#
+#Originally query_loader.perl - created Mon Jul 16 15:40:24 2007
+ 
+use strict;
+use warnings;
+use lib '/home/tbooth/sandbox/genquery/new';
+
+use Term::ReadLine;
+use DBI;
+use Data::Dumper;
+
+use GenQuery::Configuration;
+use GenQuery::DBConnection;
+ 
+our $VERSION = 1.1;
+our $USAGE = "
+    gq_edit [-c <conf-file>] [-d db] [opts] <action> [query_id[.param_id]] [file]
+	Where action is:-  list     : list all queries or all params for a query
+			   renumber : renumber all queries to be 10,20,30,etc.
+			   rencat   : rename categories
+
+			   dump   : dump the contents of the query body
+			   load   : update the query body from a file
+			   showup : show the update statement but don't run it
+			   edit   : edit the SQL and resubmit it
+
+			   qdump : dump a whole query as XML
+			   qload : load query or queries from XML
+			   qedit : edit the whole query as XML and resubmit it
+			   qdrop : no XML tricks - the query is dropped
+
+	And the options:-     -c : configuration file for GenQuery
+				    (default ./genquery_conf.xml)
+			      -d : if the config file references more than one
+			            database you can give the ID to use
+			      -i : interactive, ie. prompt before update
+			      -s : sort into menu-order when listing
+";
+
+    #Still a work in progress, but this should be able to:
+    # Produce an UPDATE statement to load a query  body into a database from a file
+    # Load and dump SELECT queries to/from query_def.query_body - ie. actually run the statement
+    # and later
+    # Do the same for query_param.menu_query
+    # and even later
+    # Convert XML to/from SQL - ie dump all queries as XML or load all queries
+    #  (what about initial insertion?  What about parameters - should I delete then reinsert?)
+    # from XML into SQL, taking care of <option> conversion.
+
+    # What about opening a query in $EDITOR and then updating from there?
+    #  Yes - it appears you can use Proc::InvokeEditor
+
+	# NOTE on user and password, and setting these outside the config file:
+	# Often, you will have a configuration file that connects to the database as a read-only user.
+	# To edit the queries you need write permission, so you need to put a more powerful username and password
+	# in the config file, but you probably don't want the password lying around.
+	# One thing you can do is set the configuration to prompt for username and password, then do something
+	# like this:
+	# % env 'gq_0_db_user=tbooth' 'gq_0_db_pass=mypass'  gq_edit list
+	# But this is not much better.  I really need a password prompt.  I'll add one at some point.
+
+use Getopt::Std;
+$Getopt::Std::STANDARD_HELP_VERSION = 1;
+sub HELP_MESSAGE { print $USAGE };
+$| = 1;
+
+# my $dbh = DBI->connect('dbi:Pg:dbname=template1', undef, undef, {AutoCommit => 0});
+
+our ($opt_c, $opt_i, $opt_d, $opt_s);
+$ARGV[0] = '--help' if ($ARGV[0] || '') =~ /help/i;
+getopts('isc:d:');
+
+$opt_c ||= $ENV{"GENQUERY_CONF"};
+if(!$opt_c)
+{
+	warn "No configuration specified via command line or \$GENQUERY_CONF - falling back to ./genquery_conf.xml.\n\n";
+	$opt_c = 'genquery_conf.xml';
+}
+
+#Make myself a readline
+my $rl = new Term::ReadLine 'Answer me!!!';
+$rl->ornaments(0);
+
+#Get config and connect
+my $config = new GenQuery::Configuration;
+$config->load_config($opt_c);
+$config->set_from_env();
+my @dbids = $config->get_db_ids();
+my $dbid = $opt_d || $dbids[0];
+
+my @params = $config->find_all_params(1,1);
+
+#See if params relate to some other db
+@params = grep{ /(.+):/ ; !(defined($1)) || $1 eq $dbid } @params;
+#See if params are set as env vars
+@params = grep{ (my $p = $_) =~ tr/A-Za-z0-9_/_/c; !defined($ENV{"gq_$p"})} @params;
+
+my ($operation, $query_id, $file) = @ARGV;
+my $param_id;
+
+$operation or die "Usage: $USAGE";
+$operation = lc($operation);
+
+if(($operation eq 'list' || $operation eq 'renumber') && @dbids != 1)
+{
+    print "Found ".@dbids," databases (@dbids) in config, using $dbid.\n";
+}
+
+if(@params) { die "Cannot connect to the database without extra parameters (@params).\n",
+		  "Put these in the configuration file or set them as ENV VARS.\n"; }
+
+my $dbconnection = new GenQuery::DBConnection($config->get_db_param($dbid));
+$dbconnection->connect();
+my $dbh = $dbconnection->get_handle();
+
+#Extract some handy stuff from the DB Connection
+my $db_host = $dbconnection->get_config()->{db_host};
+my $db_name = $dbconnection->get_config()->{db_name};
+my $query_def = $dbconnection->get_config()->{query_defs} or die "No query_defs";
+my $query_param = $dbconnection->get_config()->{query_params} or die "No query_params";
+
+#Right - now I should have a live connection to play with.  Now get down to it.
+
+#The 'renumber' operation can work without a query id
+if($operation eq 'renumber' and (!defined($query_id) or $query_id eq ''))
+{
+    #Renumber all those queries
+    #What about parameters relating to a query that does not exist?
+    my @query_ids = @{$dbh->selectcol_arrayref("
+	    SELECT query_id FROM $query_def
+	    UNION
+	    SELECT query_id FROM $query_param ")};
+
+    die "No queries found" unless @query_ids;
+
+    my ($map, $order) = make_renumber_strategy(\@query_ids, 10);
+
+    my @query_ids_to_update = @$order or die "No renumbering needed. Done.\n";
+
+#     die Dumper($map, $order);
+
+    my $sth;
+    $dbh->begin_work();
+
+    $sth = $dbh->prepare("UPDATE $query_def SET query_id = ? WHERE query_id = ?");
+    for(@query_ids_to_update)
+    {
+	$sth->execute($map->{$_}, $_);
+    }
+    $sth = $dbh->prepare("UPDATE $query_param SET query_id = ? WHERE query_id = ?");
+    for(@query_ids_to_update)
+    {
+	$sth->execute($map->{$_}, $_);
+    }
+
+    if($opt_i)
+    {
+    	print scalar(@query_ids_to_update) . " queries are about to be renumbered. ";
+    	my $confirm = $rl->readline("Really update [y/n]? ");
+    	if($confirm !~ /^[yY]/)
+    	{
+    		$dbh->rollback();
+    		die "Aborting, then.\n";
+    	}
+    }
+    $dbh->commit;
+
+    print "Queries now renumbered...";
+    $operation = 'list';
+    #Go on to list the stuff
+}
+
+#As can listing
+if($operation eq 'list' and (!defined($query_id) or $query_id eq ''))
+{
+    #Get the queries manually, since the code to do this is in GQConnection which we
+    #are not using.
+    my $res;
+    if($opt_s)
+    {
+		#Sort in display order
+		$res = $dbh->selectall_arrayref("
+			SELECT min(qd2.query_id) AS min, qd1.query_id, qd1.title, qd1.category, qd1.hide
+			FROM $query_def qd1
+			INNER JOIN $query_def qd2 on qd1.category = qd2.category
+			GROUP BY qd1.query_id, qd1.title, qd1.category, qd1.hide
+			ORDER BY min, qd1.query_id" );
+    }
+    else
+    {
+		#Sort in ID order
+		$res = $dbh->selectall_arrayref("
+			SELECT query_id as x, query_id, title, category, hide FROM $query_def
+			ORDER BY query_id" );
+    }
+
+    print "Queries found in the database:\n";
+    for(@$res)
+    {
+		my $sep = $_->[4] ? '#' : ':';
+		printf "%5s $sep %-30s (%10s)\n", @$_[1..3];
+    }
+    #And I'm done
+    exit(0);
+}
+
+#The rencat operation ignores the number
+elsif($operation eq 'rencat')
+{
+    my @categories;
+    #If there is a query specified, just rename that particular category
+    if($query_id)
+    {
+	$query_id =~ /\D/ or #...
+
+	@categories = $dbh->selectrow_array("SELECT category FROM $query_def WHERE query_id = ?", undef, $query_id);
+
+	@categories || die "No query found with ID $query_id.\n";
+    }
+    else
+    {
+	#Cunning query to get the categories in the order they appear in the interface - ie. by
+	#lowest query ID
+	@categories = $dbh->selectcol_arrayref("SELECT category FROM $query_def GROUP BY category 
+						ORDER BY min(query_id)");
+	@categories = ( $categories[0] ? @{$categories[0]} : () );
+
+	@categories || die "No queries, and therefore no categories, found in the database.\n";
+    }
+
+    #Loop through all categories asking for a new name
+    #Note - if you try to swap the names of categories in one shot this won't work if I do it the simple way.
+    #Should I read in all the IDs to get around this?  Oh yes!
+    my %renames;
+    for(@categories)
+    {
+	my $newname = $rl->readline("New name for '$_'? ");
+
+	next if(!$newname || $newname eq $_);
+	$renames{$_} = $newname;
+    }
+
+    die "No updates to make.\n" unless keys(%renames);
+
+    my %q_by_cat;
+    for(keys(%renames))
+    {
+	$q_by_cat{$_} = $dbh->selectcol_arrayref("SELECT query_id FROM $query_def WHERE category = ?", undef, $_);
+    }
+
+    print "Renaming " . keys(%renames) . " categories. ";
+
+    $dbh->begin_work if $opt_i;
+    my $sth = $dbh->prepare("UPDATE $query_def SET category = ? WHERE query_id = ?");
+    for my $category_to_rename (keys(%renames))
+    {
+	for(@{$q_by_cat{$category_to_rename}})
+	{
+	    $sth->execute($renames{$category_to_rename}, $_);
+	}
+    }
+    if($opt_i)
+    {
+    	my $confirm = $rl->readline("Really update [y/n]? ");
+    	if($confirm !~ /^[yY]/)
+	{
+	    $dbh->rollback();
+	    die "Aborting, then.\n";
+    	}
+	$dbh->commit();
+    }
+    
+    print "DONE!\n";
+
+    exit(0);
+}
+
+#And so can the qload operation
+
+elsif($operation eq 'qload')
+{
+    require XML::Simple; #Get the actual reader object from GenQuery::Configuration
+
+    #Firstly, what I currently have as the query ID is almost certainly the file
+    #to be loaded.
+    if(!defined($query_id) || $query_id =~ /[^0-9.]/ || -f $query_id)
+    {
+		$file and die "Usage: $USAGE";
+		$file = $query_id;
+		$query_id = undef;
+    }
+    
+    unless(!defined($query_id) or $query_id eq '')
+    {
+	warn "WARNING: Query ID ($query_id) is ignored for XML import.\n";
+    }
+
+    # Pseudocode - somewhat harder
+    # Check that top element is query or param or category
+    # Fail (or choose max ID + 10) if IDs are missing - nope, missing ID
+    #  will stuff up the XML reading but not sure how
+    # Find the original category for the query ID if none is specified
+    # Remove all params
+    # Remove query
+    # Insert query
+    # for all params -
+    #	if there are options construct a select('foo', 'bar', 'baz') equivalent.
+    #	add param back
+    # Done
+
+    my $xs = $config->get_xml_reader;
+    my $query = $xs->XMLin($file || '-', KeepRoot=>1);
+
+    qload($query);
+
+    exit(0);
+} 
+
+if(!defined($query_id) or $query_id eq '')
+{
+    $query_id = $rl->readline("Query ID? ");
+}
+elsif($query_id =~ /[^0-9.]/)
+{
+    #Maybe that was actually the filename
+    if(!defined($file))
+    {
+	$file = $query_id;
+	$query_id = $rl->readline("Query ID? ");
+    }
+    else
+    {
+	die "Usage: $USAGE";
+    }
+}
+
+#See if the query specifies a parameter - eg. 20.2
+($query_id, $param_id) = split(/\./, $query_id);
+
+sub make_update
+{
+    #If a string was passed use that rather than a file
+    my $body = shift;
+
+    unless(defined($body))
+    {
+		#Create an update statement to run.
+		my $infile = \*STDIN;
+		open($infile, "<$file") or die $? if $file;
+
+		$body = join('',<$infile>);
+		chomp($body);  #No need for the final LF.
+    }
+
+    my $body_quoted = $dbh->quote($body);
+
+    if($param_id)
+    {
+	return
+"UPDATE $query_param SET menu_query =
+$body_quoted
+WHERE query_id = $query_id
+AND param_no = $param_id
+";
+    }
+    else
+    {
+    	return
+"UPDATE $query_def SET query_body =
+$body_quoted
+WHERE query_id = $query_id;
+";
+    }
+}
+
+sub run_update
+{
+    my $update = shift;
+    $dbh->begin_work if $opt_i;
+
+    my $sth = $dbh->prepare($update);
+    my $rows = $sth->execute();
+
+    if($rows && $opt_i)
+    {
+    	print "The following is about to be comitted:\n\n$update\n";
+    	my $confirm = $rl->readline("Really update [y/n]? ");
+    	if($confirm !~ /^[yY]/)
+    	{
+    		$dbh->rollback();
+    		die "Aborting, then.\n";
+    	}
+    }
+
+    if($rows)
+    {
+    	$dbh->commit() if $opt_i;
+    	print "Done - query $query_id updated.\n";
+    }
+    else
+    {
+    	$dbh->rollback() if $opt_i;
+	no warnings 'uninitialized';
+    	print "Nothing was updated.  Check your query and param id ($query_id, $param_id)";
+    }
+}
+
+sub make_renumber_strategy
+{
+    my @query_ids = @{shift()};
+    my $spacing = shift || 10;
+
+    #Given a list of numbers and a spacing, come up with a renumbering strategy that will
+    #put all the numbers $spacing apart and will renumber in an order so as to not have two
+    #things with the same number at any one time.
+    
+    #Sort
+    @query_ids = sort {$a <=> $b} @query_ids;
+
+    #Make unique
+    my $last = $query_ids[0] - 1;
+    @query_ids = grep{ $_ == $last ? 0 : ($last = $_, 1) } @query_ids;
+
+    #Determine what each ID is going to map to
+    my %new_id_map; my $new_id = $spacing;
+    for(@query_ids)
+    {
+	$new_id_map{$_} = $new_id;
+	$new_id += $spacing;
+    }
+
+    #Now I need an update strategy where I am never updating a query ID
+    #to conflict with one that is still to be updated.
+    #I think I should be able to do this with sort but in corner cases it might blow up.
+    my @query_ids_to_update;
+    my %new_id_map_copy = %new_id_map;  #I need a copy I can delete from
+    ##DEBUG
+    while(@query_ids)
+    {
+	for(my $nn = 0; $nn < @query_ids; $nn++)
+	{
+	    my $thisid = $query_ids[$nn];
+
+	    #Already dealt with
+	    !defined($thisid) and next;
+
+	    #Same number means nothing to do
+	    $thisid == $new_id_map{$thisid} and delete($query_ids[$nn]), delete($new_id_map_copy{$thisid}), next;
+
+	    #Can't renumber yet if $new_id_map_copy still contains the target
+	    $new_id_map_copy{$new_id_map{$thisid}} and next;
+
+	    #OK to renumber.
+	    push @query_ids_to_update, $thisid;
+	    delete($query_ids[$nn]), delete($new_id_map_copy{$thisid});
+	}
+    }
+
+    return (\%new_id_map, \@query_ids_to_update);
+}
+
+sub grab_query
+{
+    my $query;
+    if($param_id)
+    {
+    	$query =
+"SELECT menu_query FROM $query_param WHERE
+ query_id = $query_id AND param_no = $param_id";
+    }
+    else
+    {
+    	$query =
+"SELECT query_body FROM $query_def WHERE query_id = $query_id";
+    }
+
+    my @res = $dbh->selectrow_array($query);
+
+    if(@res == 0)
+    {
+	no warnings 'uninitialized';
+    	die "Nothing found.  Check your query and param id ($query_id, $param_id)";
+    }
+
+    defined($res[0]) ? $res[0] : '';
+}
+
+sub xtrim
+{
+    #Trim whitespace from a string and add newlines at start and end, for XML formatting
+    local $_ = shift;
+    
+    my $as = @_ ? shift : '';
+    my $ae = @_ ? shift : $as;
+
+    defined($_) && /\S/ or return undef;
+    s/^\s*/$as/s; 
+    s/\s*$/$ae/s; 
+    $_;
+}
+
+sub qdump
+{
+    my($outfile, $query_id) = @_;
+
+    require XML::Writer;
+ 
+    my $qdata = $dbh->selectrow_hashref("SELECT * FROM $query_def WHERE query_id = $query_id");
+
+    #Does this query exist?
+    my $new_query = !$qdata;
+
+    my $pdata = $dbh->selectall_arrayref("SELECT * FROM $query_param WHERE query_id = $query_id ORDER BY param_no",
+					    { Slice => {} } );
+    my $xml = new XML::Writer(OUTPUT => $outfile, DATA_MODE => 1, DATA_INDENT => 4);
+    no warnings 'uninitialized';
+
+    if($new_query)
+    {
+	$xml->startTag("query_definition", id => int($query_id), category => 'Default');
+	$xml->comment("New query template from query_loader $VERSION.");
+    }
+    else
+    {
+	$xml->startTag("query_definition", id => $qdata->{query_id}, category => $qdata->{category});
+	$xml->comment("Query dumped by query_loader $VERSION.");
+    }
+
+    $xml->dataElement(title => $qdata->{title});
+    $xml->dataElement(long_label => $qdata->{long_label});
+    $xml->dataElement(hide => $qdata->{hide});
+    $xml->dataElement(icon_index => $qdata->{icon_index});
+    $xml->cdataElement(column_head => xtrim($qdata->{column_head}, "\n"));
+#     if($qdata->{query_body} =~ /\S/)
+#     {
+	$xml->cdataElement(query_body => xtrim($qdata->{query_body}, "\n")); 
+#     }
+#     else
+#     {
+# 	$xml->emptyTag("query_body");
+#     }
+	
+    $xml->dataElement(query_url => $qdata->{query_url});
+    $xml->dataElement(export_formats => $qdata->{export_formats});
+
+    if(! @$pdata)
+    {
+	$xml->comment(" Parameters go here - eg:
+    <query_param>
+	<param_text></param_text>
+	<param_type></param_type>
+	<param_name></param_name>
+	<suppress_all></suppress_all>
+	<menu_query/> or <option/>
+    </query_param>
+    "	);
+    }
+
+    for(@$pdata)
+    {
+	$xml->startTag("query_param", id => $_->{param_no});
+	$xml->dataElement(param_text => $_->{param_text});
+	$xml->dataElement(param_type => $_->{param_type});
+	$xml->dataElement(param_name => $_->{param_name});
+	if($_->{menu_query} =~ /\S/)
+	{
+	    $xml->cdataElement(menu_query => xtrim($_->{menu_query}, "\n"));
+	}
+	$xml->dataElement(suppress_all => $_->{suppress_all});
+	$xml->endTag("query_param");
+    }
+
+    $xml->endTag("query_definition");
+
+    $xml->end();
+}
+
+sub qload
+{
+    my ($query, $old_id) = @_;
+
+    my $category;
+    my $pcount = 0;
+
+    my ($rootname) = keys(%$query);
+    if($rootname eq 'query_param')
+    {
+	#I could update a single param as XML, but not right now
+	die "Loading a single parameter from XML is not supported.\n";
+    }
+    elsif($rootname eq 'query_category')
+    {
+	#Get category name (there can be only one)
+	($category) = keys( %{$query->{query_category}} );
+
+	#Re-root to the first query (there could be more than one)
+	#First get to the hash of query_id => query
+	my $qs = [values( %{$query->{query_category}} )]->[0]->{query_definition};
+	if(scalar(keys(%$qs)) != 1)
+	{
+	    die "There should be one single query defined in the XML\n";
+	}
+
+	($query_id) = keys(%$qs);
+	$query = $qs->{$query_id};
+    }
+    elsif($rootname eq 'query_definition')
+    {
+	#Similar to above, but there can be only one query as it is the root, so
+	#no need to check that
+	($query_id) = keys( %{$query->{query_definition}} );
+
+	#Re-root
+	$query = $query->{query_definition}->{$query_id};
+
+	#Now I need to see if either the category is supplied within the XML or can I extract
+	#it from the database.
+	$category = $query->{category};
+
+	if(!defined($category))
+	{
+	    ($category) = $dbh->selectrow_array("
+		SELECT category FROM $query_def
+		WHERE query_id = $query_id
+		");
+	}
+
+	if(!defined($category))
+	{
+	    #Oh well...
+	    $category = 'Default';
+	}
+    }
+    else
+    {
+	die "Document root $rootname is not recognised, sorry.";
+    }
+
+    #Right, now to remove all the parameters and the query.  Always use transactions
+    #as this is fiddly.
+    $dbh->begin_work();
+
+    #If the query is not being renumbered there will not be an old_id
+    $old_id = $query_id if !defined($old_id);
+
+    my $statementlog = '';
+    my $statement;
+    
+    $statement = "DELETE FROM $query_param WHERE query_id = $old_id;";
+    $statementlog .= "$statement\n\n";
+    $dbh->do($statement);
+
+    $statement = "DELETE FROM $query_def WHERE query_id = $old_id;";
+    $statementlog .= "$statement\n";
+    $dbh->do($statement);
+
+    my $qqt = $dbh->quote($query->{title});
+    my $qqc = $dbh->quote($category);
+
+    $statement = "
+    INSERT INTO $query_def 
+    (query_id, title, category, long_label, hide, icon_index, column_head, 
+	query_body, query_url, export_formats) VALUES 
+    ($query_id, $qqt, $qqc, ?, ?, ?, ?, ?, ?, ? );";
+    $statementlog .= "$statement\n";
+    
+    $dbh->do($statement, {},
+		$query->{long_label},
+		$query->{hide} || 0,
+		$query->{icon_index},
+		xtrim($query->{column_head}),
+		xtrim($query->{query_body}),
+		$query->{query_url},
+		$query->{export_formats},
+	     );
+
+    if($query->{query_param})
+    {
+	$statement = "
+INSERT INTO $query_param 
+    (query_id, param_no, param_type, param_name, param_text, menu_query, suppress_all) VALUES
+    ($query_id, ?, ?, ?, ?, ?, ?);";
+	$statementlog .= "$statement\n";
+
+	my $sth = $dbh->prepare($statement);
+
+	#Now it is possible that the query_param may reference a hash or an array.
+	my $qp = $query->{query_param};
+	if(ref($qp) eq 'ARRAY')
+	{
+	    #Make a hash instead!
+	    my $nn = 1;
+	    $qp = { map {($nn++ => $_)} @$qp };
+	}
+
+	my @pids = sort keys %$qp;
+	$pcount =  scalar(@pids);
+	$statementlog .= "...repeated for " . scalar(@pids) . " parameters\n";
+	for $param_id (@pids)
+	{
+	    my $param = $qp->{$param_id};
+	    my $menu_query = $param->{menu_query};
+
+	    #Fix options list - in GQ presence of options overrides any menu_query
+	    #Synthesise the list with a SELECT
+	    if($param->{option})
+	    {
+		$menu_query = "SELECT " . join(',', map {$dbh->quote($_)} @{$param->{option}});
+	    }
+
+	    $sth->execute( $param_id,
+			   $param->{param_type},
+			   $param->{param_name},
+			   $param->{param_text},
+			   $menu_query,
+			   $param->{suppress_all});
+	}
+    }
+
+    if($opt_i)
+    {
+    	print "The following operations are about to be comitted:\n\n$statementlog\n";
+    	my $confirm = $rl->readline("Really update [y/n]? ");
+    	if($confirm !~ /^[yY]/)
+    	{
+    		$dbh->rollback();
+    		die "Aborting, then.\n";
+    	}
+    }
+
+    $dbh->commit();
+    print "Done - query $query_id was loaded with $pcount parameters.\n",
+          "Query title: $query->{title}, Category: $category\n";
+
+}## End of qload function
+
+if($operation eq 'renumber')
+{
+    die "Automatic renumbering of params in a query is not yet supported - use qedit to do it manually.\n";
+
+    $operation = 'list';
+}
+elsif($operation eq 'list')
+{
+    #Get the parameters manually, since the code to do this is in GQConnection which we
+    #are not using.
+    my $res = $dbh->selectall_arrayref("
+	SELECT param_no, param_type, param_name, param_text FROM $query_param
+	WHERE query_id = $query_id
+	ORDER BY param_no" );
+
+    print "Params found for query $query_id in the database:\n";
+    for(@$res)
+    {
+	$_->[2] = '[undef]' if !defined $_->[2];
+	printf "%5s : %-10s %-16s ... %-20s\n", @$_;
+    }
+    #And I'm done
+    exit(0);
+}
+elsif($operation eq 'showup')
+{
+    my $psql = "psql ";
+    $psql .= "-h $db_host " if $db_host;
+    $psql .= "-d $db_name " if $db_name;
+    $psql .= "-f -";
+
+    my $update = make_update();
+
+    #Direct loading not yet supported.  Dump SQL:
+    if($param_id)
+    {
+    	print 
+"--Run this using psql or some such, eg. 
+-- query_loader.perl @ARGV | $psql
+
+$update
+";
+    }
+    else
+    {
+    	print 
+"--Run this using psql or equivalent, eg. 
+-- query_loader.perl @ARGV | $psql
+
+$update
+";
+    }
+}
+elsif($operation eq 'load')
+{
+    my $update = make_update();
+
+    run_update($update);
+}
+elsif($operation eq 'dump')
+{
+    #Is this going to a file or STDOUT?
+    my $outfile = \*STDOUT;
+    open($outfile, ">$file") or die $? if $file;
+    
+    my $result = grab_query();
+    print $outfile "$result\n";
+}
+elsif($operation eq 'edit')
+{
+    require Proc::InvokeEditor;
+
+    my $origtext = grab_query() . "\n";
+    
+    my $newtext = Proc::InvokeEditor->edit($origtext, '.sql');
+
+    if($newtext eq $origtext)
+    {
+		die "Nothing was changed.  Done.\n";
+    }
+    else
+    {
+		chomp($newtext);
+		my $update = make_update($newtext);
+	
+		eval { run_update($update); };
+		if($@)
+		{
+			#Dump the query, otherwise the edits just vanish.
+			print STDERR "Failed to commit this:\n$newtext\n";
+			die "\n";
+		}
+    }
+}
+elsif($operation eq 'qdump')
+{
+    # Open the file for output
+    my $outfile = \*STDOUT;
+    open($outfile, ">$file") or die $? if $file;
+    
+    # Pseudocode - not too hard:
+    # get query (ignore the param number)
+    # get all params
+    # dump using XML::Writer
+    # ...or similar for just param
+
+    if($param_id) {warn "WARNING: Param ID ($param_id) is ignored for XML export.\n"};
+
+    qdump($outfile, $query_id);
+
+}
+elsif($operation eq "qdrop" || $operation eq "drop")
+{
+
+    #Right, now to remove all the parameters and the query.
+    $dbh->begin_work() if $opt_i;
+
+    my $statementlog = '';
+    my $statement;
+    my $rows = 0;
+    
+    $statement = "DELETE FROM $query_param WHERE query_id = $query_id;";
+    $statementlog .= "$statement\n\n";
+    $rows += $dbh->do($statement);
+
+    $statement = "DELETE FROM $query_def WHERE query_id = $query_id;";
+    $statementlog .= "$statement\n";
+    $rows += $dbh->do($statement);
+
+
+    if($opt_i)
+    {
+	if($rows)
+	{
+	    print "The following is about to be comitted:\n\n$statementlog\n";
+	    my $confirm = $rl->readline("Really drop this query [y/n]? ");
+	    if($confirm !~ /^[yY]/)
+	    {
+		    $dbh->rollback();
+		    die "Aborting, then.\n";
+	    }
+	    $dbh->commit();
+	}
+	else
+	{
+	    $dbh->rollback();
+	}
+    }
+
+    if($rows)
+    {
+	print "Query $query_id was expunged.\n";
+    }
+    else
+    {
+	print "Query $query_id not found!  Nothing removed.\n";
+    }
+}
+elsif($operation eq 'qedit')
+{
+    #Right, the really exciting one!
+    require Proc::InvokeEditor;
+    require IO::String;
+
+    #qdump part
+    #Use IO:String to capture what XML writer makes
+    my $origtext = '';
+    qdump(IO::String->new($origtext), $query_id);
+
+    #edit part
+    my $newtext = Proc::InvokeEditor->edit($origtext, '.xml');
+
+    if($newtext eq $origtext)
+    {
+	die "Nothing was changed.  Done.\n";
+    }
+
+    #else - qload part
+    eval {
+		my $xs = $config->get_xml_reader;
+		my $query = $xs->XMLin($newtext, KeepRoot=>1);
+
+		qload($query, $query_id);
+    };
+    if($@)
+    {
+		#Dump the query, otherwise the edits just vanish.
+		print STDERR "Failed to commit this:\n$newtext\n";
+		die $@;
+    }
+
+    #There you go, squire
+}
+else
+{
+    die "Usage: $USAGE";
+}
+
+1;
+####
+

@@ -1,0 +1,285 @@
+<table><row><query_id>10</query_id><title>Bio-Linux Clones</title><category>Bio-Linux</category><long_label>Shows details of Bio-Linux clones</long_label><hide>0</hide><column_head>ID;EG Purchased;EG Grant;Email received;Form received;PO recieved;Machine arrived;Installed;Upgrade;Clone;IP address;Version;Administrator;Email;User Group;Comments;Location</column_head><query_body>select h.hardware_id,case when h.eg_purch=true then 'YES' else 'NO' end,coalesce(p.grant_no,'No project recorded'),
+coalesce(to_char(h.date_requested,'DD Mon YY'),'-'),
+coalesce(to_char(h.date_app,'DD Mon YY'),'-'),
+coalesce(to_char(h.date_po,'DD Mon YY'),'-'),
+coalesce(to_char(h.date_machine,'DD Mon YY'),'-'),
+coalesce(to_char(h.date_installed,'DD Mon YY'),'-'),
+coalesce(to_char(h.date_upgrade,'DD Mon YY'),'-'),
+h.hostname||'.'||h.domainname,
+h.ipaddr,coalesce(h.biolinux_version,'-'),
+coalesce(s.title,'-')||' '||s.first_name||' '||s.last_name,s.email,coalesce(h.user_group,'-'),h.comments,
+coalesce(a.address1,' ')||','||a.institute||','||a.city||' '||a.postcode
+from a_staff_address sa,a_address a,a_staff_member s,a_hardware h
+left outer join a_lab_project p on h.project_id=p.project_id where h.staff_id=s.staff_id and s.staff_id = sa.staff_id
+and sa.address_id = a.address_id
+$?PARAM1{{ and h.hostname||'.'||h.domainname= $PARAM1 }}
+$?PARAM2{{ and h.ipaddr= $PARAM2 }}
+$?PARAM3{{ and s.first_name||' '||s.last_name= $PARAM3 }}
+$?PARAM4{{ and p.grant_no= $PARAM4 }}
+$?PARAM5{{ and ltrim(to_char(h.hardware_id,'9999999'))= $PARAM5 }}
+order by h.eg_purch
+</query_body></row><row><query_id>4</query_id><title>Insert or Update Clone details</title><category>Bio-Linux</category><hide>0</hide><query_body></query_body><query_url>http://bioinf2.nox.ac.uk/cgi-bin/biolinux.cgi</query_url></row><row><query_id>17</query_id><title>Start and End dates</title><category>EG Grant Information</category><long_label>Query showing grants with start and end dates</long_label><hide>0</hide><column_head>NERC Grant No;PI;Start date;End date</column_head><query_body>select p.grant_no,pi.last_name,to_char(p.date_start,'DD Mon YYYY'),
+       to_char(p.date_end,'DD Mon YYYY')
+from a_lab_project p,a_proj_pi_v pi
+where p.grant_prog='EG'
+and p.project_id=pi.project_id
+order by (p.date_end)</query_body></row><row><query_id>2</query_id><title>Course details</title><category>Courses</category><long_label>Shows details of courses,search on course title or city</long_label><hide>0</hide><column_head>ID;Title;From;To;Institute;City;Materials URL;Attendees</column_head><query_body>select c.course_id,c.title,
+to_char(c.from_date,'DD Mon YY'),
+to_char(c.to_date,'DD Mon YY'),
+a.institute,a.city,c.materials_url,count(cs.staff_id) 
+from ((a_course c left outer join a_address a on 
+  (c.venue_address_id = a.address_id)) left outer 
+    join a_course_staff cs on (cs.course_id = c.course_id)) 
+where 1 = 1
+$?PARAM1{{ and ( c.title = $PARAM1 or ($PARAM1 = 'NULL' and c.title is null ) }} 
+$?PARAM2{{ and ( a.city like '%' || $PARAM2 || '%' or ($PARAM2 = 'NULL' and a.city is null)) }} group by c.course_id,c.title,c.from_date,c.to_date,a.institute,a.city,c.materials_url order by c.from_date</query_body></row><row><query_id>18</query_id><title>Awardee Feedback</title><category>EG Grant Information</category><long_label>Awardee feedback mainly from April 2004 meeting</long_label><hide>0</hide><column_head>NERC Grant No;PI;Comments</column_head><query_body>select p.grant_no,pi.last_name,comments
+from a_lab_project p,a_proj_pi_v pi
+where p.grant_prog='EG'
+and p.project_id=pi.project_id
+$?PARAM1{{ and p.grant_no = $PARAM1 }}
+$?PARAM2{{ and pi.last_name = $PARAM2 }}</query_body></row><row><query_id>22</query_id><title>PG&amp;P Awardees</title><category>PG&amp;P Grant Information</category><long_label>Query showing summary of staff on each PG&amp;P project</long_label><hide>0</hide><column_head>Grant;Name;Postion;Address;Phone;Fax;Email </column_head><query_body>select p.grant_no,
+coalesce(s.title,'-')||' '||coalesce(s.first_name,'-')||' '||coalesce(s.last_name,'-'),
+t.staff_type,
+coalesce(a.address1,'-')||','||coalesce(a.address2,'-')||','||coalesce(a.address3,'-')||','||coalesce(a.address4,'-')||','||coalesce(a.institute,'-')||','||coalesce(a.city,'-')||','||coalesce(a.postcode,'-'),
+s.phone,s.fax,s.email 
+from (((((a_project_staff ps inner join a_lab_project p 
+on (ps.project_id=p.project_id)) right outer join a_staff_member s 
+on (ps.staff_id=s.staff_id)) left outer join a_staff_address sa 
+on (s.staff_id=sa.staff_id)) left outer join a_address a 
+on (sa.address_id=a.address_id)) inner join a_proj_pi_pgp_v as pi 
+on (p.project_id=pi.project_id)),
+a_staff_type t  
+where ps.staff_type_id = t.staff_type_id 
+and p.grant_no is not null 
+and p.grant_prog = 'PG&amp;P' 
+$?PARAM6{{ and (a.city = $PARAM6 or ($PARAM6 = 'NULL' and a.city is null)) }}
+$?PARAM2{{ and (upper(s.last_name) like upper('%'|| $PARAM2 ||'%') or ( $PARAM2 = 'NULL' and s.last_name is null)) }}
+$PARAM1{{ and (upper(s.first_name) like upper('%'|| $PARAM1 ||'%') or  ($PARAM1 = 'NULL' and s.first_name is null)) }}
+$PARAM3{{ and (s.title = $PARAM3 or ( $PARAM3 = 'NULL' and s.title is null)) }}
+$PARAM4{{ and (p.grant_no = $PARAM4 or ( $PARAM4 ='NULL' and p.grant_no is null)) }}
+$PARAM5{{ and (t.staff_type= $PARAM5 or ( $PARAM5 ='NULL' and t.staff_type is null)) }}
+$PARAM7{{ and (pi.last_name= $PARAM7 or ($PARAM7 = 'NULL' and pi.last_name is null)) }}
+order by p.grant_no,t.staff_type</query_body></row><row><query_id>40</query_id><title>EG Awardees</title><category>EG Grant Information</category><long_label>Query showing summary of staff on each EG project</long_label><hide>0</hide><column_head>Grant;Name;Position;Address;Phone;Fax;Email</column_head><query_body>select p.grant_no,coalesce(s.title,'-')||' '||coalesce(s.first_name,'-')||' '||coalesce(s.last_name,'-'),
+t.staff_type,
+coalesce(a.address1,'-')||','||coalesce(a.address2,'-')||','||coalesce(a.address3,'-')||','||coalesce(a.address4,'-')||','||coalesce(a.institute,'-')||','||coalesce(a.city,'-')||','||coalesce(a.postcode,'-'),
+s.phone,s.fax,s.email 
+from (((((a_project_staff ps inner join a_lab_project p 
+on (ps.project_id=p.project_id)) right outer join a_staff_member s 
+on (ps.staff_id=s.staff_id)) left outer join a_staff_address sa 
+on (s.staff_id=sa.staff_id)) left outer join a_address a 
+on (sa.address_id=a.address_id)) inner join a_proj_pi_v as pi 
+on (p.project_id=pi.project_id)),a_staff_type t  
+where ps.staff_type_id = t.staff_type_id 
+and p.grant_no is not null and p.grant_prog = 'EG' 
+$?PARAM6{{ and (a.city = $PARAM6 or ($PARAM6 = 'NULL' and a.city is null)) }}
+$?PARAM2{{ and (upper(s.last_name) like upper('%'|| $PARAM2 ||'%') or ( $PARAM2 = 'NULL' and s.last_name is null)) }}
+$PARAM1{{ and (upper(s.first_name) like upper('%'|| $PARAM1 ||'%') or  ($PARAM1 = 'NULL' and s.first_name is null)) }}
+$PARAM3{{ and (s.title = $PARAM3 or ( $PARAM3 = 'NULL' and s.title is null)) }}
+$PARAM4{{ and (p.grant_no = $PARAM4 or ( $PARAM4 ='NULL' and p.grant_no is null)) }}
+$PARAM5{{ and (t.staff_type= $PARAM5 or ( $PARAM5 ='NULL' and t.staff_type is null)) }}
+$PARAM7{{ and (pi.last_name= $PARAM7 or ($PARAM7 = 'NULL' and pi.last_name is null)) }}
+order by p.grant_no,t.staff_type</query_body></row><row><query_id>81</query_id><title>Find by Keyword</title><category>Data Catalogue</category><long_label>Supply a keyword to search on</long_label><hide>0</hide><column_head>Name;Originator;Date;Publicly Viewable;Accession</column_head><query_body>select dataset_name, originator, modified_date, make_public, link
+from cat_dataset_links where filename in 
+(select filename from cat_keyword where 1 = 1
+$?PARAM1{{ and kwtype = $PARAM1 }}
+$?PARAM2{{ and lower(keyword) like lower('%'|| $PARAM2 ||'%') }}
+)</query_body></row><row><query_id>8</query_id><title>Bio-Linux Config files</title><category>Bio-Linux</category><long_label>Generates local.cfg file and firewall request for selected clone</long_label><hide>0</hide><column_head>Config File;Firewall Request</column_head><query_body>select  Config_File, Firewall_Request from a_bio_linux_config2 
+where 1 = 1
+$?PARAM1{{ and hostname||'.'||domainname = $PARAM1 }} 
+$?PARAM2{{ and ipaddr = $PARAM2 }}</query_body></row><row><query_id>23</query_id><title>Track barcode equipment</title><category>Barcoding</category><long_label>Query showing barcoding equipment applications</long_label><hide>0</hide><column_head>Grant;Lab Head; Staff Contact;Email;Scanners requested;Printers requested;Date form received;Date equipment sent;Comments</column_head><query_body>select coalesce(p.grant_no,'No project recorded'),
+coalesce(s.title,'-')||' '||s.first_name||' '||s.last_name,
+coalesce(s2.title,'-')||' '||s2.first_name||' '||s2.last_name,
+coalesce(s2.email,'no email'),
+b.no_scanners,b.no_printers,
+coalesce(to_char(b.date_form,'DD Mon YY'),'not received'),
+coalesce(to_char(b.date_sent,'DD Mon YY'),'not sent'),
+b.comments
+from a_barcode b left outer join a_lab_project p on (b.project_id=p.project_id)
+left outer join a_staff_member s on (b.lab_head_id=s.staff_id)
+left outer join a_staff_member s2 on (b.staff_id=s2.staff_id)
+left outer join a_staff_address sa on (s2.staff_id=sa.staff_id)
+left outer join a_address a on (sa.address_id=a.address_id) order by b.date_form</query_body></row><row><query_id>24</query_id><title>PG&amp;P Grant Titles</title><category>PG&amp;P Grant Information</category><long_label>Query showing titles of PG&amp;P grants</long_label><hide>0</hide><column_head>Grant;PI;Title</column_head><query_body>select coalesce(p.grant_no,'No project recorded'),
+coalesce(s.title,'-')||' '||s.first_name||' '||s.last_name,
+coalesce(p.title,'-')
+from a_lab_project p left outer join a_project_staff ps on (p.project_id=ps.project_id)
+left outer join a_staff_member s on (ps.staff_id=s.staff_id)
+left outer join a_staff_type st on (st.staff_type_id=ps.staff_type_id)
+where ps.staff_type_id=1249
+and p.grant_prog = 'PG&amp;P' order by s.last_name</query_body></row><row><query_id>25</query_id><title>EG Grant Titles</title><category>EG Grant Information</category><long_label>Query showing titles of EG grants</long_label><hide>0</hide><column_head>Grant;PI;Title</column_head><query_body>select coalesce(p.grant_no,'No project recorded'),
+coalesce(s.title,'-')||' '||s.first_name||' '||s.last_name,
+coalesce(p.title,'-')
+from a_lab_project p left outer join a_project_staff ps on (p.project_id=ps.project_id)
+left outer join a_staff_member s on (ps.staff_id=s.staff_id)
+left outer join a_staff_type st on (st.staff_type_id=ps.staff_type_id)
+where ps.staff_type_id=33
+and p.grant_prog = 'EG' order by s.last_name</query_body></row><row><query_id>26</query_id><title>Start and End dates</title><category>PG&amp;P Grant Information</category><long_label>Query showing grants with start and end dates</long_label><hide>0</hide><column_head>NERC Grant No;PI;Start date;End date</column_head><query_body>select p.grant_no,pi.last_name,to_char(p.date_start,'DD Mon YYYY'),
+       to_char(p.date_end,'DD Mon YYYY')
+from a_lab_project p,a_proj_pi_pgp_v pi
+where p.grant_prog='PG&amp;P'
+and p.project_id=pi.project_id
+order by (p.date_end)</query_body></row><row><query_id>11</query_id><title>Bio-Linux &amp; Genespring counts</title><category>EG Grant Information</category><long_label>Tracks Bio-Linux and GeneSpring Installs</long_label><hide>0</hide><column_head>Grant;PI;Bio-Linux allowed;Bio-Linux EG;Bio-Linux bought;GeneSpring allowed;GeneSpring actual</column_head><query_body>select s.grant_no,pi.last_name,s.count,coalesce(b.count,0),coalesce(bo.count,0),s.count_gs,coalesce(g.count,0)   from ((((a_proj_pi_coi_v s left outer join a_proj_biolinux_eg_v b on (s.project_id=b.project_id)) left outer join a_proj_biolinux_own_v bo on (s.project_id=bo.project_id)) left outer join a_proj_gs_v g on (s.project_id=g.project_id)) left outer join a_proj_pi_v pi on (s.project_id=pi.project_id))  order by s.grant_no</query_body></row><row><query_id>27</query_id><title>Bio-Linux and GeneSpring counts</title><category>PG&amp;P Grant Information</category><long_label>Tracks Bio-Linux and GeneSpring Installs</long_label><hide>0</hide><column_head>Grant;PI;Bio-Linux allowed;Bio-Linux PG&amp;P;Bio-Linux bought;GeneSpring allowed;GeneSpring actual</column_head><query_body>select s.grant_no,s.last_name,p.biolinux,coalesce(b.count,0),coalesce(bo.count,0),p.genespring,coalesce(g.count,0)
+from a_proj_pi_pgp_v s left outer join a_lab_project p on (s.project_id=p.project_id)
+left outer join a_proj_biolinux_pgp_v b on (s.project_id=b.project_id)
+left outer join a_proj_biolinux_ownpgp_v bo on (s.project_id=bo.project_id)
+left outer join a_proj_gs_pgp_v g on (s.project_id=g.project_id) 
+order by p.biolinux desc</query_body></row><row><query_id>1</query_id><title>Contact details</title><category>Awardees and general contacts</category><long_label>Query shows name and email address, search on first name, last name or title</long_label><hide>0</hide><column_head>Staff_id;Project_id;Address_id;Round;EG_grant_no;Name;Address;Institute;City;Postcode;Email;Phone;Fax;Source</column_head><query_body>select s.staff_id,p.project_id,a.address_id, coalesce(p.round,0),coalesce(p.grant_no,'-'),
+coalesce(s.title,'-')||' '||coalesce(s.first_name,'-')||' '||coalesce(s.last_name,'-'),coalesce(a.address1,' ')||' '||coalesce(a.address2,' ')||' '||coalesce(a.address3,' ')||' '||coalesce(a.address4,' '),
+a.institute,a.city,a.postcode,s.email,s.phone,s.fax,s.source 
+from ((((a_project_staff ps inner join a_lab_project p on (ps.project_id=p.project_id)) right outer join a_staff_member s on (ps.staff_id=s.staff_id)) left outer join a_staff_address sa on (s.staff_id=sa.staff_id)) left outer join a_address a on (sa.address_id=a.address_id))  where 1 = 1 
+$?PARAM5{{ and
+(a.city = $PARAM5 or ($PARAM5 ='NULL' and a.city is null)) }}
+$?PARAM2{{ and  (upper(s.last_name) like upper('%'|| $PARAM2 ||'%') or ($PARAM2 = 'NULL' and s.last_name is null)) }}
+$?PARAM1{{ and (upper(s.first_name) like upper('%'|| $PARAM1 ||'%') or ($PARAM1 = 'NULL' and s.first_name is null)) }}
+$PARAM3{{ and (s.title = $PARAM3 or ( $PARAM3 = 'NULL' and s.title is null)) }}
+$?PARAM4{{ and (p.grant_no = $PARAM4 or ($PARAM4 ='NULL' and p.grant_no is null))  }}
+order by p.round,p.grant_no</query_body></row><row><query_id>3</query_id><title>Contacts (excel export)</title><category>Awardees and general contacts</category><long_label>Contacts for export into excel</long_label><hide>0</hide><column_head>EG_grant_no;Position;Title;First Name;Last Name;Address1;Address2;Address3;Address4;Institute;City;Postcode;Email;Phone;Fax;Source</column_head><query_body>select coalesce(p.grant_no,'-'),
+coalesce(t.staff_type,'-'),
+coalesce(s.title,'-'),
+coalesce(s.first_name,'-'),
+coalesce(s.last_name,'-'),
+coalesce(a.address1,' '),
+coalesce(a.address2,' '),
+coalesce(a.address3,' '),
+coalesce(a.address4,' '),
+a.institute,a.city,a.postcode,s.email,
+s.phone,s.fax,s.source 
+from ((((((a_project_staff ps inner join a_lab_project p 
+on (ps.project_id=p.project_id)) right outer join a_staff_member s 
+on (ps.staff_id=s.staff_id)) left outer join a_staff_address sa 
+on (s.staff_id=sa.staff_id)) left outer join a_address a 
+on (sa.address_id=a.address_id)) left outer join a_staff_member_type st 
+on (st.staff_id=s.staff_id)) left outer join a_staff_type t 
+on (st.staff_type_id=t.staff_type_id)) 
+where 1 = 1
+$?PARAM2{{ and (upper(s.last_name) like upper('%'|| $PARAM2 ||'%')
+  or ( $PARAM2 = 'NULL' and s.last_name is null)) }}
+$?PARAM1{{ and (upper(s.first_name) like upper('%' ||PARAM1|| '%') 
+  or ( $PARAM1 = 'NULL' and s.first_name is null)) }}
+$?PARAM3{{ and (s.title = $PARAM3 or ( $PARAM3 = 'NULL' and s.title is null)) }}
+$?PARAM4{{ and (t.staff_type = $PARAM4 
+  or ( $PARAM4 ='NULL' and t.staff_type is null)) }}
+order by p.grant_no</query_body></row><row><query_id>6</query_id><title>GeneSpring Installs</title><category>GeneSpring</category><long_label>Shows details GeneSpring installs</long_label><hide>0</hide><column_head>Id;Install id;EG Grant No; Lab;Contact;Email;IP Address;GS Version;Requested;Form received;Firewall updated;Completed;Comments</column_head><query_body>select  g.genespring_id,g.install_id,p.grant_no,
+coalesce(a.address1,'-')||' '||a.institute,s.title||' '||s.first_name||' '||s.last_name,
+s.email,h.ipaddr,g.genespring_version,
+coalesce(to_char(g.date_req,'DD Mon YY'),'-'),
+coalesce(to_char(g.date_app,'DD Mon YY'),'-'),
+coalesce(to_char(g.date_firewall,'DD Mon YY'),'-'),
+coalesce(to_char(g.date_comp,'DD Mon YY'),'-'),
+coalesce(g.comments,'-') 
+from a_staff_member s,a_genespring_install g,a_hardware h,
+a_lab_project p,a_staff_address sa, a_address a  
+where g.staff_id = s.staff_id 
+and s.staff_id = sa.staff_id 
+and sa.address_id = a.address_id 
+and g.hardware_id = h.hardware_id 
+and h.project_id = p.project_id 
+$?PARAM1{{ and p.grant_no= $PARAM1 }} 
+$?PARAM2{{ and h.ipaddr= $PARAM2 }} 
+order by g.install_id</query_body></row><row><query_id>7</query_id><title>Course Attendees</title><category>Courses</category><long_label>Details of Course attendees</long_label><hide>0</hide><column_head>Name;Email;Phone;Institute;City;EG Grant No;Type;Accom</column_head><query_body>select coalesce(s.title,'-')||' '||coalesce(s.first_name,'-')||' '||coalesce(s.last_name,'-'),coalesce(s.email,'-'),
+coalesce(s.phone,'-'),
+a.institute,a.city,
+coalesce(case when min(p.grant_no)=max(p.grant_no) then min(p.grant_no) else min(p.grant_no)||'&lt;br>'||max(p.grant_no) end,'-'),
+(case when cs.presenter = true then 'Presenter' when cs.host = true then 'Host' else 'Attendee' end) as type,
+case when cs.accom = true then 'Yes' else 'No' end  
+from ((((a_project_staff ps inner join a_lab_project p 
+on (ps.project_id = p.project_id)) right outer join a_staff_member s 
+on (ps.staff_id=s.staff_id)) left outer join a_staff_address sa 
+on (s.staff_id=sa.staff_id)) left outer join a_address a 
+on (sa.address_id = a.address_id)), 
+a_course c, a_course_staff cs 
+where c.course_id = cs.course_id 
+and cs.staff_id = s.staff_id 
+$?PARAM1{{ and (c.title||'-'||to_char(c.from_date,'DD Mon YY') = $PARAM1) }} 
+group by s.title,s.first_name,s.last_name,s.email,s.phone,a.institute,a.city,cs.accom,cs.presenter,cs.host order by type</query_body></row><row><query_id>9</query_id><title>Bio-Linux Mail Merge</title><category>Bio-Linux</category><long_label>Mail merge query for Vanessa</long_label><hide>0</hide><column_head>Email received;Form received;PO received;Machine arrived;Installed;Clone;Administrator;Email;mail merge;mail merge;mail merge;mail merge;mail merge;mail merge;mail merge</column_head><query_body>select 
+coalesce(to_char(h.date_requested,'DD Mon YY'),'-'),
+coalesce(to_char(h.date_app,'DD Mon YY'),'-'),
+coalesce(to_char(h.date_po,'DD Mon YY'),'-'),
+coalesce(to_char(h.date_machine,'DD Mon YY'),'-'),
+coalesce(to_char(h.date_installed,'DD Mon YY'),'-'),
+h.hostname||'.'||h.domainname,s.title||' '||s.first_name||' '||s.last_name,
+s.email,a.address1,a.address2,a.address3,a.address4,a.institute,a.city,a.postcode 
+from a_hardware h,a_address a,a_staff_member s,a_staff_address sa 
+where h.staff_id=s.staff_id 
+and s.staff_id = sa.staff_id 
+and sa.address_id = a.address_id
+order by h.date_requested,h.date_app,h.date_po,
+h.date_machine,h.date_installed,a.city,a.institute</query_body></row><row><query_id>12</query_id><title>Bio-Linux Installs Pending</title><category>Bio-Linux</category><long_label>Shows details of clones not yet installed</long_label><hide>0</hide><column_head>EG Purchased;EG Grant;Email received;Form received;PO recieved;Machine arrived;Installed;Upgrade;Clone;IP address;Version;Administrator;Email;User Group;Comments;Location</column_head><query_body>select case when h.eg_purch=true then
+'YES' else 'NO' end,coalesce(p.grant_no,'No project recorded'),coalesce(to_char(h.date_requested,'DD Mon
+YY'),'-'),coalesce(to_char(h.date_app,'DD Mon
+YY'),'-'),coalesce(to_char(h.date_po,'DD Mon
+YY'),'-'),coalesce(to_char(h.date_machine,'DD Mon
+YY'),'-'),coalesce(to_char(h.date_installed,'DD Mon
+YY'),'-'),coalesce(to_char(h.date_upgrade,'DD Mon
+YY'),'-'),h.hostname||'.'||h.domainname,
+h.ipaddr,coalesce(h.biolinux_version,'-'),coalesce(s.title,'-')||'
+'||s.first_name||'
+'||s.last_name,s.email,coalesce(h.user_group,'-'),h.comments,
+coalesce(a.address1,' ')||','||a.institute||','||a.city||' '||a.postcode
+from a_staff_address sa,a_address a,a_staff_member s,a_hardware h left outer join
+a_lab_project p on h.project_id=p.project_id where h.staff_id=s.staff_id and
+s.staff_id = sa.staff_id and sa.address_id = a.address_id 
+$?PARAM1{{ and h.hostname||'.'||h.domainname = $PARAM1 }} 
+$?PARAM2{{ and h.ipaddr = $PARAM2 }} 
+$?PARAM3{{ and s.first_name||' '||s.last_name = $PARAM3 }} 
+and h.date_installed is null and
+h.biolinux_version not like 'retired' order by h.eg_purch</query_body></row><row><query_id>13</query_id><title>4.0 Upgrades pending</title><category>Bio-Linux</category><long_label>Shows Bio-Linux clones not yet updated to 3.0</long_label><hide>0</hide><column_head>EG Purchased;EG Grant;Email received;Form received;PO recieved;Machine arrived;Installed;Upgrade;Clone;IP address;Version;Administrator;Email;User Group;Comments;Location</column_head><query_body>select case when h.eg_purch=true then
+'YES' else 'NO' end,
+coalesce(p.grant_no,'No project recorded'),
+coalesce(to_char(h.date_requested,'DD Mon YY'),'-'),
+coalesce(to_char(h.date_app,'DD Mon YY'),'-'),
+coalesce(to_char(h.date_po,'DD Mon YY'),'-'),
+coalesce(to_char(h.date_machine,'DD Mon YY'),'-'),
+coalesce(to_char(h.date_installed,'DD Mon YY'),'-'),
+coalesce(to_char(h.date_upgrade,'DD Mon YY'),'-'),
+h.hostname||'.'||h.domainname, h.ipaddr,
+coalesce(h.biolinux_version,'-'),coalesce(s.title,'-')||'
+'||s.first_name||'
+'||s.last_name,s.email,coalesce(h.user_group,'-'),h.comments,
+coalesce(a.address1,' ')||','||a.institute||','||a.city||' '||a.postcode
+from a_staff_address sa,a_address a,a_staff_member s,a_hardware h left outer join
+a_lab_project p on h.project_id=p.project_id where h.staff_id=s.staff_id and
+s.staff_id = sa.staff_id and sa.address_id = a.address_id and h.biolinux_version
+not like '%4%' 
+$?PARAM1 {{ and h.hostname||'.'||h.domainname = $PARAM1 }}
+$?PARAM2 {{ and h.ipaddr = $PARAM2 }}
+$?PARAM3 {{ and (s.first_name||' '||s.last_name = $PARAM3 }} 
+and h.biolinux_version not like 'retired' order by h.eg_purch</query_body></row><row><query_id>14</query_id><title>Current Course Signups</title><category>Courses</category><long_label>Course signups through web
+interface</long_label><hide>0</hide><column_head>Name;Email;Phone_No;EG Awardee;Accomodation;University;City;Grant;Further Info</column_head><query_body>select coalesce(t.title,'')||' '||coalesce(t.first_name,'')||'
+'||coalesce(t.last_name,''),
+t.email,coalesce(t.phone,'-'),
+case when t.eg_awardee=TRUE then 'Yes' else 'No' end,
+case when t.accom=TRUE then 'Yes' else 'No' end,
+coalesce(t.institute,'-'),coalesce(t.city,'-'),
+coalesce(nerc_grant,'-'),coalesce(t.info,'-')
+from a_course_temp t $?PARAM1{{ where t.course_date = $PARAM1 }}</query_body></row><row><query_id>82</query_id><title>Detailed Search</title><category>Data Catalogue</category><long_label>Enter one or more search terms</long_label><hide>0</hide><column_head>Name;Originator;Last Updated;Publicly Viewable;Accession;&lt;linkwithterms</column_head><query_body>select dataset_name, originator, to_char(modified_date,'DD Mon YYYY'), 
+case when make_public then 'YES' else 'NO' end, 
+'egcat:' || filename, 
+'http://ivpcp044/cgi-bin/egcat/view_dataset.cgi?dsname=' || filename
+from cat_dataset where 1 = 1
+$?PARAM1{{ and
+filename in (select filename from cat_keyword where
+kwtype = 'holdingtype' and keyword = $PARAM1 ) }}
+$?PARAM2{{ and
+filename in (select filename from cat_keyword where
+kwtype = 'holdingsubtype' and keyword= $PARAM2 ) }}
+$?PARAM5{{ and
+filename in (select filename from cat_keyword where
+kwtype in ('species', 'taxgroup') and lower(keyword) like(lower('%'|| $PARAM5 ||'%'))) }}
+$?ACCN{{ and filename = substring ($ACCN from char_length($ACCN) - 5) }}
+$?PARAM3{{ and (
+filename in (select filename from cat_keyword  where
+keyword ilike '%'|| $PARAM3 ||'%') or dataset_name ilike '%'|| $PARAM3 ||'%' or
+summary ilike '%'|| $PARAM3 ||'%' or
+filename in (select filename from cat_staff_index where last_name ilike  $PARAM3)
+$?PARAM4{{ or
+filename in (select filename from cat_keyword  where
+keyword ilike '%'|| $PARAM4 ||'%') or dataset_name ilike '%'|| $PARAM4 ||'%' or
+summary ilike '%'|| $PARAM4 ||'%' or
+filename in (select filename from cat_staff_index where last_name ilike  $PARAM4) }} ) }}
+order by filename</query_body></row><row><query_id>80</query_id><title>By Name, Grant or PI</title><category>Data Catalogue</category><long_label>Select datasets to display</long_label><hide>0</hide><column_head>Name;Grant;Originator;Modified;Holdings;Verified;Publicly Viewable;Accession;&lt;linknoterms</column_head><query_body>select dataset_name, grant_number, originator, modified_date, holdings, verified, make_public, 'egcat:' || filename,
+'http://ivpcp044/cgi-bin/egcat/view_dataset.cgi?dsname=' || filename
+from cat_dataset_links where 1 = 1
+$?PARAM1{{ and dataset_name = $PARAM1 }} 
+$?PARAM2{{ and grant_number = $PARAM2 }} 
+$?PARAM3{{ and originator= $PARAM3 }}
+$?PARAM4{{ and grant_number in (select grant_no from a_lab_project where grant_prog = $PARAM4 ) }}</query_body></row></table>

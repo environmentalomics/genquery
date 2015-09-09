@@ -1,0 +1,1514 @@
+So, the new GenQuery.  Where do we start?
+
+With a nice diagram, I think.  Then some type definitions:
+
+GenQuery::Configuration
+
+new()
+loadConfig($configfilename) 
+setFromCGI($cgiobj) -> return hasUserParams()
+getParam($pname) -> value
+
+hasUserParams() -> bool #are there any user-settable params?
+needsUserParams() -> bool
+validateAllParams() -> true or throws error (what did I intent to check
+here??)
+
+generateHTMLPrompts() -> return stuff for login form
+
+GenQuery::DBConnection
+#Handles stuff specific to PG, MySQL, Oracle
+&connect(%allparams) -> true or die with error
+&makegqconnection() -> GQConnection or die with error
+
+GenQuery::GQConnection
+
+new($dbh) -> $this
+getQueryCollection() -> QueryCollection
+
+GenQuery::QueryCollection
+
+getCategories() -> @catList
+getByCategory($cat) -> QueryCollection (empty if bad category)
+getQueryIDs -> @idlist (in order)
+getByID($id) -> QueryCollection (singleton)
+getInfoByID($id) -> { title => $name, long_label => $description, category => $cat,
+		      query_url => $url (if this is a linker), icon_index => $iconindex
+		      (will be defaulted by QC if not in table)}
+instantiateByID($id) -> QueryInstance ($id can be undef if list is singleton)
+
+#Trying to instantiate a linker (URL pseudo-query) will result in an exception
+
+new() - makes a new empty collection
+freeze() - Serialises and returns the result as a string
+thaw($string) - Replace current collection with this frozen collection
+new($string) - convenience for new()->thaw($string)
+
+# GenQuery::Query
+# makeInstance() -> $::QueryInstance
+
+GenQuery::QueryInstance
+getName() -> name
+getID() -> ID from table
+getParamCount() -> $n
+getParamIDs() -> @idlist (in order)
+getParamInfoByID($id) -> { param_name => $name, param_label => $label, 
+		       parma_type => see_types }
+#getParamName($nn) -> $name
+#getParamType($nn) -> "TEXT","MENU","RADIO","MULTI" <think about this>
+getParamValues($id) -> @list or undef for text
+
+#Need more thought on id vs name
+
+setParamByID($id, @values)
+setParamByName($name, @values)
+setParamsByName({%paramhash}) -> number set
+execute -> ResultTable or die with error
+
+#This needs to be serialisable.  It needs to be passed as a CGI parameter in
+#such a way that it can be safely deserialised, and it needs to be converted
+#to a permalink with all fields intact.  I think YAML may be called for, or
+#maybe just use CGI load/save serialisation.
+
+#Actually, I don't want to include the query in the permalink. Just the ID and
+the parameters.  Maybe offer both options.
+
+getPermaLink -> $link (everything after the foo.cgi? needed to redo this query by
+name)
+#Actually, instead of a lump of text return a CGI object.  This can then be
+manipulated and serialised at the last.
+#The 'getPermalink' method does not belong with the query object because it
+then makes the query rely on CGI.  It belongs in WebQuery.pm
+
+#Basically an array of arrays plus an array of titles
+GenQuery::ResultTable
+getHeadings() -> arr
+getNextRow() -> arr
+rewind()
+
+GenQuery::HTMLRenderer
+renderResults(ResultTable) -> $htmlstring
+#also
+renderQueryForm(Query) -> $htmlstring
+
+No need for the above - this is done within GenQuery::WebQuery
+
+GenQuery::CSVRenderer - nick this off the barcode system.
+# Not needed right now, but how will it work?  Call it with something like a
+# permalink.
+
+# Decided to just have an export($fmt) method on ResultTable
+
+#I have half an eye on web services.  What needs to be bourne in mind here is that
+#web services cannot be subject to random updates.  Therefore there must be a mechanism
+#whereby a snapshot of the param tables are made, and a suitable WSDL created to match.
+#Making "QueryCollection" generic makes it serialisable, so we can save the things out.
+#We can then save a WSDL and a matching query snapshot, which is good, right?
+
+1) The static (easy for the user) way:
+
+GenQuery::WSDLGenerator
+GenQuery::OperationRegistry
+
+#For each query generate a web services procedure -> eg:
+findRecordsByKeyword($keyword) -> $result (see below for thoughts on what $result
+is)
+
+Now we need a way that when the query params change the procedure is still
+available.  I think we can use soapAction to embed a persistent ID into the
+WSDL that will then be picked up by the WSDL interpreter.  If not, I will have
+to mandate that the md5key is passed as the first parameter 'md5' or else that a
+parameter with the name taken from the md5 is created which can be passed with
+any value.  But if it can't be passed transparently then I'm wasting time with
+this whole idea.
+
+Anyway, we have some way to associate a key with each available query and a
+way to put it in the WSDL and a way to get it back, so what do we do with this
+facility?
+
+When the WSDL is generated, each non-disabled query becomes an operation and
+an md5sum is generated from the entry.  A perl query object is generated,
+serialised and stored in a registry table* along
+with the name of the function and md5sum (and date to help out the
+administrator).  If the entry already exists with that md5sum it is just left
+as-is and the serialisation bit can be skipped.
+
+*wrapped by the OperationRegistry, may either be in the DB or in a flat file
+on the server - probably the former.
+
+Now when the function is called, rather than a standard dispatch, a generic
+function is called* which retrieves the appropriate query object based on the
+md5sum, not the name, and deserialises it.  The parameters are passed in and off we go.
+
+*The perl autoloader does this anyway, so should be easy to rig up.
+
+If the query gets fixed then maybe there should be a way to update the
+registry with the same md5sum but that is problematic and hacky.  Only sure way is to
+delete the registry line and force users to grab and use new WSDL.
+
+If the call is invalid - ie entry has been cleared from registry - we just get an error.
+
+GenQuery::Enactor
+
+So the Enactor class will be the web-service-aware class that handles the
+requests described above, grabs the query from the OperationRegistry, runs it
+and instantiates a new XMLRenderer to which it feeds the ResultsTable.  Then
+returns said XML result.
+
+2) The dynamic (easy for me, so do this first) way:
+
+We have a static WSDL which lets you:
+
+getCategories() -> @cats
+getQueryNames() -> @names
+getQueryNamesByCategory($catname) -> @names
+getParamsForQuery($queryname) -> @paramnames
+runQuery($queryname, @params) -> $result
+
+Now I guess 'result' will be an XML fragment which I can define.  Is there a
+standard way to represent an SQL resultset in XML?  Probably not, but I can
+have a stab.  Probably redo DBIx::XML but using XML::Writer
+
+This gives us
+
+GenQuery::XMLRenderer
+
+which will produce the XML.
+
+The above will be defined in a static WSDL and a wrapper class will implement
+all the procedures above.
+
+The configuration parameters:
+
+db_type : Pg/MySQL/etc.
+db_host :
+db_name :
+db_user : !prompt:User Name
+db_pass : !passprompt:Password
+db_schema : !prompt:Something else #Using schemas is a sensible way to
+differentiate which query tables get picked up.  You can give the schema a
+name which is meaningful to the user.  Should this not be a dropdown?
+
+query_defs : a_query_defs
+query_params : a_query_params
+
+only_category : #Allows you to show only one category
+
+template_dir : gq1 #A directory where the template files are lurking.
+
+#No, the above prompting does not work too well.  Instead, put the default in
+#the thingy and have:
+
+field
+label
+notes
+type
+default (- no this goes in above!)
+?options
+
+prompt1: db_user, User Name, TEXT, Your PostgreSQL User Name
+prompt2: db_pass, Password, PASS
+prompt3: query_defs, Query Mode, MENU, , Foo, Bar, Baz
+
+What we should be able to feed in as CGI:
+All control params will be lowercase, all query params will be lowercase
+
+category = show this category (by name)
+
+queryname = show this query (by name)
+queryid = showthisquery (by id)
+
+runqueryid = run query (by id)  Params not supplied will be filled with correct defaults.
+
+#Classic mode - lets us avoid one DB access.  Worth it?  Probably, as it avoids inconsistencies when
+#the table is being changed.  security??? Also good for permalink.
+run_query = 1 to run or 0 to display
+query_string (escaped, but that is OK as we don't print into the HTML any more)
+column_head
+param_names (or what?)  We need to know these for the multi-select thing
+
+###1st Feb - OK, it seems that the way forward is to load all the queries (ie
+the querycollection) every time and then rather than pass around the query
+string I just need to have a reference to the query id and I can look up
+everything else.  Now recreating the querycollection every time from the
+database is one option, or the other is to serialise it and revivify it each
+time.  I shall experiment with both and maybe do some benchmarking!
+
+The parameter with the payload shall be 'allqueries'.  If a category
+restriction is set in the config file then the query list will always be
+whittled before it is instantiated.
+
+2 thoughts:
+1) Don't hold the SQL in the frozen param, but do hold everything else.
+2) Allow a 'run arbitrary query' which is dead easy and Dawn likes it.  Make
+sure said thing can be bookmarked.
+
+Random thought - make queryCollection->get_by_category() work efficiently when
+there is only one category anyway the retunring $this implies queryCollections
+are immutable, which is a good plan.
+
+##Dealing with putting hyperlinks in the table
+
+So how do we do this passing of search parameters in a link?
+I think that links should work by coalescing several columns so that if I do:
+
+"select 'foo', 'bar', 'http://wibble.ac.uk/cgi-bin/foo.cgi?baz=3&splod=armadillos'"
+
+Then the columns say:
+
+"Fooness;Barlink;<linknoterms"
+
+Or else
+
+"Fooness;Barlink;<linkwithterms"
+
+GenQuery will transform this into a link and pass along the query terms to boot:
+
+Fooness | Barlink
+foo	| <a href="http://wibble.ac.uk/cgi-bin/foo.cgi?baz=3&splod=armadillos&PARAM1=whatever">bar</a>
+
+Anything not generated with this mechanism will come through htmlescaped and
+therefore literal, so you can no longer fudge links in the database.
+
+##Multiple values - ie using a set of tick boxes rather than a dropdown list.
+
+I would like to be able to give a list of items and there to be a load of tick
+boxes where the user can select one, zero or more.  This is a problem for oh so
+many reasons.
+
+Supporting multiple values?  Could generate CS list, but then I need to quote the bastards - how about this:
+
+If I see multiple values for PARAM then I check to see if the query contains ':PARAM' and if so I magically transform it
+to 'val1', 'val2', 'val3' otherwise I leave out the quotes and join with a
+comma (works for numbers).  A bit magic but should work.
+
+If nothing is selected then what?  Hmmm.  I could replace with 'null' which
+matches nothing, but I don't think I get anything through for the parameter at
+all, so I need to check what is missing not just what I have - not too hard I
+guess.
+
+select * from bighit.customer where date_of_birth in (':PARAM') or :#PARAM = 0;
+
+Having :#PARAM always return a count seems good.  Easy to check if a box is
+filled in or something.  Should we auto-filter defaults?
+
+>>> Hang on, we already have a mechanism to quote stuff and a security problem
+>>> with unquoted stuff going to the DB.  Why not have all params put through
+>>> quote mechanism of Perl and then multiple ones can be quoted and joined
+>>> with commas.  Params should be $PARAM, not :PARAM - $ is not used in SQL
+>>> for anything special.  We could also allow $?PARAM{{ ... }} to include or
+>>> exclude bits if a param is unset.  This neatens up a lot of stuff anyway.
+
+Permitted types:
+
+TEXT - a text box
+MENU - auto-choose between radio or dropdown (over 4 means dropdown)
+DROPDOWN - a combobox
+RADIO - a set of radio buttons
+MULTI - a set of check-boxes, or a single one if you like
+(could use a multi-selct list, but no)
+
+Some examples?  Later.
+
+Additional - added $!PARAM{{ }} construct to complement the one above.  Now I
+can do a crude either/or.
+Also added a YESNO type which makes the appropriate radio buttons.
+
+## The template dir.
+
+This will need to have:
+
+HTML files:
+    menu. for the two modestemplate.html
+    query.template.html
+    results.template.html
+    login.template.html
+CSS if that is referenced by the HTML files.
+Maybe we can allow the queries to be put into the directory in CSV format?
+Look into that one...
+
+OK, so the idea is that the login page is handled in it's own right, and will
+have a space for an error message (like 'incorrect password' or 'you have been
+naughty')
+Then a form with:
+A table for label, field, notes
+A hook to the next run mode <TMPL_VAR NAME=NEXT_RUN_MODE>
+(anything else to be preserved??)
+A Login button
+
+If someone is trying to access a saved query, say, and they need to supply a
+DB password, they should be redirected back to where they want by the power of
+persistence.
+
+The other templates may have aspects of all parts, so it is up to the template
+author if we see the menu and the query on the results page.  They can even be
+the same - this is the genius of the design!
+
+So params to set are:
+
+DATABASE_NAME
+SCHEMA_NAME
+SECTION_TITLE (where you are in the menus or "Main Menu")
+SECTION_PATH (the same as a whole path) - eg "Bio-Linux > Bio-Linux Clones"
+(erm)
+
+#menu
+persistence and start form
+Need to carry over login params+name of option and set mode.
+I think this was done with a form per option? Yes, it was.
+
+bool SHOWING_TOP_MENU
+bool SHOWING_SUB_MENU
+
+Loop over:
+
+CURRENT_MENUS
+    <form>
+    MENU_ITEM_PARAMS
+    MENU_ITEM_NAME
+    -MENU_ITEM_ICON (or how do i set the icon? - pass the whole tag?)
+    -LINK (for submit, or use tag above?)
+    MENU_ITEM_SUBMIT (use css to set the icon)
+    </form>
+    
+or:
+
+Can we support the current menu opening within the structure?
+
+Would need:
+
+PARENT_MENUS
+    <form>
+    MENU_ITEM_PARAMS
+    NAME
+    ICON_NAME
+    <form/>
+    CHILD_MENUS
+	<form>
+	MENU_ITEM_PARAMS
+	NAME
+	ICON_NAME
+	</form>
+
+That should do it.  We do need the alternate names for the two modes, yes we do!
+
+OK, we have a problem here.  I want to attach the whole query collection into
+the hidden field in MENU_ITEM_PARAMS but this means repeating a big chunk of
+junk right through the HTML, which is just nasty.  Unfortunately the
+alternative is to use magic to set the state:
+
+MENU_ITEM_PARAMS : dies
+MENU_AND_CONNECTION_STATE : goes in, with hidden fields for login params
+(serialised from Config) and for menu (serialised from AllQueries)
+
+Main menu button click goes to submenu
+Submenu button click goes to query
+
+Which means I need to encode the next state and the category name or query ID
+into the submit button:
+
+$query->submit(-name=>'submit',
+               -value=>'newstate+submenuname');
+
+But then this appears on the button label!  Argh!  No, it's parobably OK.
+
+((
+Or, we keep the current scheme and use a little snippet of javascript to set
+the state parameter.  We have one function which supplies the state and we
+have a function in each form to slot it in.  Hmmm.  Grrr.
+
+OK, I'll do it the non-js way for now.  Later I could insert the js if there is
+a GENQUERY_JS_FUNCTIONS placeholder in the template.
+)) - no, bad idea.
+
+Or... The form button is always called 'menu_submit' and the value is:
+
+main
+category id
+query id (or image link, think about this later)
+
+7/2/05 - Investigated images in stylesheets and images in general - what a can of worms!
+You can only specify a background in CSS and you always need a valid SRC or
+you get a regex.
+You can only have a 'value' submitted in Firefox.  In Lynx the value will be
+displayed as the label, so:
+
+Set a submit_image in the config file, which should by default be a blank .gif
+Give the styles as shown below to allow CSS control of real image
+Give alt text of ""
+Give value of "Go"
+Give name of "go_mainmenu" or "go_submenu_<id>" or "go_query_<id>"
+Now have a hack in CGI to fish out first "go" and reconstruct to "rm=" and
+"menu_or_query="
+
+Phew.
+
+One thought - can I avoid the blank .gif by using a little JS fragment to set
+the foreground image to the background image, or is that just silly?
+
+Update on 8/3:
+This only works if the size of the image is known.  Back to square 1.  I give
+up - I'll put the images in the config file. :-(
+
+For straight link, generate: 
+<a href="link"><img border="0" src="same.as.before" class="class"/></a>
+yep, that works
+
+#query:
+bool SHOWING_QUERY
+
+Right, for this bit we need:
+SECTION_TITLE (see above)
+SECTION_LABEL (from db)
+put the note about NULL in the HTML.  HTML will have to provide for case with
+no params, but note that in that case this stage will never be reached.
+
+QUERY_FORM : generate the lot from code.  But guarantee that certain styles
+will be used.  Need to think more about the styling API...
+
+QUERY_PERMALINK : A link to jump straight to this query.
+
+#results:
+bool SHOWING_RESULTS
+
+#Something for persistence?
+QUERY_LINK (a url to re-run this query, referencing the query id)
+QUERY_LINK_PERSISTENT (a persistent URL to run this query with all the SQL and
+headers so it is truly persistent unless the schema changes (maybe?))
+
+<table>
+RESULTS_TABLE_HEADER
+RESULTS_TABLE_ROW
+    ROW_DATA # eg <td>foo</td><td>bar</td>
+ROWS_RETURNED
+EXECUTION_TIME (maybe)
+
+Styling:
+
+We need some agreement on styles between the module, template and CSS:
+
+#The whole query form is generated in CGI, with these styles in it.
+gq_form_table
+gq_form_submit (no - user does that so it can be an image or whatever)
+gq_form_label
+
+gq_result_table
+
+er...text in tables, notes?
+
+We should be able to set the icons by CSS too:
+
+gq_submit_main - used for top-level item
+gq_submit_selected - used for top-level when open in tree-type view
+gq_submit_1 - indexed icon for submenu
+qg_submit_2
+...etc
+
+If you don't want to pullute the stylesheet with the gq names you can encode the mappings into
+the top of the HTML. Does that make sense?
+
+No - the CSS is a dead loss.  New scheme (for now) is to have a file in the
+templates directory with the image names in it and then use those.  The
+default indices will be:
+Query - 1
+Query straight to URL - 2
+Category - 3
+Open category - 4
+If the index is beyond the end of the list the first line is taken.
+
+#TODO - think about how the module can be used to generate embedded links when
+included in another site.  What methods should be exposed?
+
+(er, did I mean embedded queries??)
+
+#Note to self - all HTML escaping to be done within the code.  One less
+thing
+for template owner to worry about.
+Er?  What was the other option?  Not sure what I meant.
+
+New things for 8/2.  Think about JIT and Pro versions of HTML::Template and
+whether these will be useable.
+
+Also the '<pivotquery' query. Similar to '<linkwithterms'
+Rather than taking a URL out of the database, the second column is the name of
+a query.  All the returned fields for that row will be encoded into a
+permalink which targets the named query, with the names of the fields taken
+from the names coming from the query rather than the table headings.  Any
+mismatches just get ignored, anything missing defaults to 'ALL', and thus you
+can do something like:
+
+Query 1 - Summarise barcodes by type and owner.
+Query 2 - Goes down to block level.
+Query 3 - Goes down to barcode level then link to code lookup.
+
+Should these be links or buttons on mini-forms?
+
+On the subject of 'ALL'.  We have a bit of a problem.  It is useful from a
+web-form point of view to have the word 'ALL' being special, but looking at
+the GenQuery core code the client should not have to supply the string 'ALL'
+to get all results, rather it should logically not set the parameter at all,
+or set it to undef.  So, when ALL is selected on a form the parameter will be
+left unset but will then be substituted for the string ALL anyway.
+Basically there are two ALLs, and the upshot is they can be different.  There
+is no reason for the library code to care about the interface 'ALL'.  There is
+no reason for the interface to use ALL at all.  The command line version would
+not, for example.
+As for NULLs, these will be dealt with by specific SQL constructions and maybe
+a "Include NULLs" flag but that is up to the user.
+
+TODO - Allow queries to be specified in XML files as well as in the database
+tables.
+
+Added a cache_queries option which can turn off the passing of YAML.
+
+Added a login_cookies option which can be yes/no/both
+Username and password will be saved as cookies on successful login and
+retrieved by the config object.
+
+Now a logout button is needed...DONE (document what this does! - ie clears the
+cookies)
+
+I'm wondering if I should load certain modules on demand - eg ResultTable?
+I think running under mod_perl is probably a more sensible option, however.
+
+Note on the #menu, #query, #results labels in the HTML.  I was keeping this
+all within the template, but this breaks down for pivot queries.  Therefore
+added 'bookmarks_on_links' option to config.  This causes WebQuery to tell the
+ResultTable to add a postfix to all the links.  It also bolts one to the
+Permalink.  It is up to the HTML still to start the query form with 
+<form method="POST" action='#results'>.
+
+Added an new keyword column heading - <hide does not alter previous column,
+but hides the marked column
+
+I think a rewrite of the column processing code may be needed to hide 2
+columns in a row.  The current code is illegible anyway.
+
+Suggestions from Nathan:
+
+DATE datatype which supplies a JavaScript calendar.  Maybe need a neater way
+to add more datatyes than the current big-if-else system.
+
+What about hard coded lists of stuff?  "select 1, 2, 3, 4"  Should I add all
+columns to the list, or should I support a second column to do allow
+label/value pairs which would make searching easier?  How can I support both?
+
+1) select distinct city from address; - normal
+2) select addr_id, number || " " || road as label from address; - if the
+second col is label then the first is the values
+3) select "foo", "bar" as baz; - In any case apart from 2 all values are
+taken, row first.  1 is actually redundant since it is the same as this.
+
+--> But this is yet another hack! - better to supplement the types with LMENU,
+LDROPDOWN, LRADIO, LMULTI which are then the labelled versions.  The input
+list of params is simply converted to a hash such that the odd elements become
+values and the even ones become labels.
+
+Nathan does not want 'ALL' on everything, but this seems to be fundamental to
+GQ.
+
+TODO: use multi-selection for view allocation blocks by type
+      yay - done
+
+ALSO - ensure that long fields do not go into pivot queries.  Maybe set an
+arbitrary 30/50 char limit?  IE goes up to 2083 chars so lose 183 for
+URL+overhead and 20 each for variable names.  If we have 20 cols they can each
+be 2083 - 183 - 400 = 1500 / 20 = 75.  OK, so if a string is over 75 chars
+then zap it entirely.  Can set this in config.
+
+TODO: I currently calculate the menu state and the query form every time.
+Optimise so that this only gets done if the appropriate fields are actually
+present in the template.
+
+Right - Documentation.  I seem to have GQ 1.0 sewn up and ready to bung on the
+barcode site.  Many features are missing but the core ones are complete.
+
+I'll have to go back and re-read all the above but basic docs are needed for
+now:
+
+1) manifest
+2) dependencies
+3) database setup
+4) what goes where
+5) what files to edit
+
+I'll start a document in ~/Documents/genquery/guide.odt
+
+If this is to make it onto SourceForge/CPAN all the POD needs doing.  Mmmmm -
+POD
+
+Note - changed YESNO type to work with old CGI.pm - minor fix, see code.
+
+Return to GQ on 30/5:
+
+Right, I am going to re-redo the button image thing based on the hack outlined
+here:
+http://www.ampsoft.net/webdesign-l/image-button.html
+
+but as described that only works for the query buttons and not the direct
+links, so I'm using an even uglier CSS hack.  Yuk.
+
+That should be the final fix!
+
+The XML/multiple database issue 7/6:
+
+Now messed around most of the config stuff, but have to deal with the
+DBConnection, GQConnection issue.
+Currently a DBConnection is generated and it creates a GQConnection
+but this no good.  QueryCollections hang onto a GQConnection which is OK.  A
+query instance needs to know its database ID but it still makes sense to go
+via the GQConnection.
+
+Old procedure:
+
+my $dbconn = new GenQuery::DBConnection($conf->get_param('db_type'));
+$dbconn->connect($conf);
+$conn = $dbconn->make_gq_connection();
+
+New connection procedure:
+
+create GQConnection which starts empty
+my $conn = new GenQuery::GQConnection
+
+then
+
+$conn->setup_from_config($conf);
+
+Should also support (and these will be used by the above):
+
+$conn->add_connection(conn_id, {params})
+
+$conn->add_query(conn_id, {params})
+
+#And finally
+
+$conn->connect_connection(@conn_ids) #or empty for all
+
+#When a connection is added it could auto-connect.  But this means that GQ will
+#connect to all databases every time.  But if I make the connections lazy then
+I can't control when a connection error is going to be raised.
+
+I think that I will put in an explicit connect_connection so that in future I
+can set up from config, connect a single DB and query that.  The webquery will
+just call connect_connection() to connect all for now.
+
+Notes on the query-instance to connection linkup spaghetti:
+
+Hmmm...
+Each DBConnection is separate
+Each GQConnection manages many DB conns
+Each QueryCollection gets either a GQConnection or an object which can serve
+one up when conn() is called, and knows which queries match to which
+connection ID in the GQConnection 
+Each QueryInstance gets the conn() from the collection, upon which it wants to
+be able to call conn, quote, get_params_for_query, get_values_for_param
+
+So if I pass the connection ID to the QueryInstance then I'm good to go, I
+think?
+I don't want the QueryInstance dealing directly with the DBConnections as this
+makes too many layers of junk.  Everything goes back to GQConnection and comes
+with a DBID.
+
+Brief note on 13/7/06:
+I'm trying to set up GQ 1.0 for Frank.  Problem 1 - it sux.
+Problem 2 - having a default value for a prompted login parameter fails
+because the parameter gets set to null in set_from_cgi, but in fact it should
+be kept - fixed on ivpcl19 but will need a rethink in GQ 2.1
+Also logout does not seem to be clearing everything, but this may just be the
+Firefox remember password feature in action...
+
+Now 6/9/06:
+Getting back into shape after adding the XML config file and the
+multi-database capability.  Looking into a calendar functionality by using
+http://www.dynarch.com/demos/jscalendar/ which is very slick.  To make it
+work:
+
+I need to supply three js files and one css (the winter one) to be included with
+the GQ stylesheet.
+
+When a data query is specified the HTML needs to gain a control of the form:
+
+<input type="text" name="$qp_name" id="calendar_$calid"
+       />
+<button type="reset" id="calendar_popup_$calid" class="date_picker_icon"
+	onClick="alert('Calendar feature has not been loaded!')"
+       >...</button>
+<script type="text/javascript">
+    Calendar.setup({
+        inputField     :    "f_date_b",           //*
+	firstDay       :    1,
+        ifFormat       :    "%Y-%m-%d",
+        showsTime      :    false,
+        button         :    "f_trigger_b",        //*
+        step           :    1
+    });
+</script>
+
+User must add the following to <head> of query.template.html:
+
+<style type="text/css">@import url(calendar.css);</style>
+<script type="text/javascript" src="calendar.js"></script>
+<script type="text/javascript" src="calendar-en.js"></script>
+<script type="text/javascript" src="calendar-setup.js"></script>
+
+Or else I can put the above into a template fragment and load it with a
+<TMPL_INCLUDE NAME="calendar.tmpl">
+
+Hopefully now if the user clicks the button they either get the calendar or a
+warning that the feature is not loaded. - Yes they do!
+
+TODO - currently if the login cookies expire we get a bad password error but
+we should get an expiration error.
+
+Also I should follow up on my plans for the multiple connection stuff, where
+it would be possible to run the same query over several databases.  Needs
+some more thought and more work - I said in a note:
+<database/> <!-- Optional if you just want to use the default.  If you
+                 give more than one then the user will be prompted to
+		 choose or can select ALL as per usual -->
+
+On 23/10 - Currently ignoring several known serious bugs (eg queries in XML
+not working at all) to only fix stuff needed by HandleBar, ie:
+
+1) The issue with IE not reporting which button was clicked.  Fixed with JS
+plus a hidden field.  JS only active under IE, but need to test on Konq/Safari
+anyway.
+2) Better error when templates are not found.
+
+LMULTI and friends were implemented.  Don't forget to document them.
+
+Added the following comment in ResultSet:
+#Currently I use fetchall_arrayref to get all the data in one go, and hold it in
+#{res}.  If the database is returning more than 2000 rows, and I'm only diplaying the first
+#2000, then it should make sense to only fetch 2000.  Problem is, the DBD::Pg manual says:
+# ...Hence the "execute" method fetches all data at once into data structures located in the
+#  front-end application. This approach must to be considered when selecting large amounts 
+#  of data!
+#In other words, you can't win! Bah.
+
+The UNICODE annoyance.  Argh.  OK, we should set the client_encoding and the
+page_encoding to UNICODE each time.  Then it would be sensible to encode all
+output to UNICODE, but that don't work because Perl thinks the strings coming
+back from the database are all ASCII and double-encodes them leading to
+borkage.
+So I either need to either mark everything that comes out as UTF manually or
+else I could not do any encoding and say that the templates have to be UTF-8,
+which could work OK.
+Also I'd need to make sure everything set as a query parameter was valid UTF-8
+- I don't know if the browser would sort that out for me, or else I'd have to
+read the POST headers and work out what conversion to do.  In any case - what
+a bunch of arse!
+
+On 23/3 - Been a while, but on a more positive note I seem to have nailed the
+button display problems for all common browsers.  Just needed a bit of
+tinkering and a little JavaScript...
+Also fixed the JS calendar feature in IE - there was an extra comma in my call
+to the setup function.
+
+On 25/4 - Still putting off the web services implementation.  Will get there
+in the end.  For now, two things:
+
+1 - a debug mode where all queries are reported and all hidden/special columns
+are shown in the output.  Need to think how this would be activated or
+disabled. (Done!)
+
+TODO - add a global disable_debug option to the XML so that people can
+turn off debugging if they don't like it. disable_debugging
+If the flag is not set, export a debug link as well as the permalink
+
+2 - the query_linkout table outlined in the Handlebar CHANGELOG.  (Also
+corresponding XML).  This requires the implementation of
+GenQuery::Util::ParamPacker.  Also consider other Util classes.
+
+On 5/3 - Decided to test on mod_perl, which uncovered some shortcomings
+relating to UTF-8.  Modified WebQuery.pm to get around these but more testing
+is needed to see what happens when a variety of utf-8 and non-utf8 data is
+extracted from the databases.  In general, though, GQ looks happy running
+under mod_perl and Apache::DBI, unlike Handlebar.
+TODO - Check template caching, which is a remaining bottleneck to running
+GenQuery at full speed under mod_cgi.  Should be able to use the memory cache
+mode and be completely transparent under cgi/mod_perl.
+
+ParamPacker seems to be working, so on with the query_linkout definition.
+
+On 8/3 -
+
+Debug is done but I need to be able to access the debug mode from the error
+template so this is still TODO.
+
+Database naming.  Having added the facility to connect to multiple databases
+it is useful to be able to expose the name of the databases in the web
+interface (or wherever).  The current model is that a query does not know what
+database it is associated with, but the QueryCollection object knows the
+mapping between queries and database IDs, and the GQConnection knows how to
+translate these into actual connections.  In order to make the display work,
+I've needed to associate each query with a database display name.  The idea is
+that this is not definitive and it would still be possible to apply a query
+instance to an alternative database or to add the mechanism for a query to be
+run over several databases without refactoring the underlying code.  I don't
+see myself adding this feature any time soon, though.
+
+Fixed gq_rerun.cgi to pick up the config file used for the last run.
+
+TODO (am I making these jobs faster than I finish them??):
+Make a script/wizard which will set up a personal GQ instance for a user, who has
+installed the package as follows:
+
+Prompt for:
+web directory (default ~/public_html)
+cgi-bin directory (default $webdir/cgi-bin)
+database port, host, name, username, password
+<test connection>
+create tables (y/n)
+copy scripts
+create config file
+show URL
+
+====>
+
+The new query_linkout table:
+CREATE TABLE genquery.query_linkout
+(
+  query_id int4 NOT NULL,	-- ID of query this linkout applies to
+  url text NOT NULL,		-- The base URL
+  label text,			-- A label to appear in the HTML
+  name varchar(20) NOT NULL,	-- The name to be used in the template param
+  key_column varchar(20) NOT NULL,	-- The internal name of the column to use in this linkout
+  pack bool DEFAULT false NOT NULL,      -- Should GenQuery::Util::ParamPacker be used?
+  CONSTRAINT pk_query_linkout PRIMARY KEY (query_id, name)
+) 
+WITHOUT OIDS;
+
+Or in the XML:
+
+<query_definition>
+    ...
+    <query_linkout name="LINK1">
+	<url>http://foo.bar/baz.cgi</url>
+	<label>Lovely link</label>
+	<key_column>grah</key_column>
+	<pack>yes</pack>
+    </query_linkout>
+</query_definition>
+
+(Note this will make XML::Simple hash by name, and we order the linkouts
+alphabetically, but that's OK!)
+
+To make it work:
+
+- Configuration should ensure that XML::Simple loads this properly
+- Since linkouts are only ever needed in results mode, add load_linkouts to
+  sit alongside the load_paramvals found in QueryInstance
+- A QueryInstance should be able to report all linkouts via get_linkouts()
+- A ResultTable does not need to know about the user defined linkouts, but it
+  should be able to generate a linkout URL if requested...
+- As ResultTable already deals with munging URLs for linkwithterms it makes
+  sense to keep the messing here with:
+  generate_linkout($url, $colname, $pack)
+  ...which makes the full link to be inserted in the template by WebQuery.
+- I originally wanted to feed linkouts into LINKOUT_{NAME} but this scuppers a
+  generic template, for which I want a loop of LINKOUTS -> {LABEL, LINK} but
+  the latter stops me formatting the page just how I want.  Therefore do both.
+
+On 9/5: Sidetracked again.  Made it possible to have a list of parameters in
+the XML without an id attribute.  Previously behaviour was to segfault(!).
+Had to do this twice as vim lost some changes.  Think I got everything - need
+to test.
+Then noticed that a parameter list query seems to be being executed at some
+point before results for an unrelated query are displayed.  Need to
+investigate... This was because of a collision between the XML and SQL - the
+database was being read to determine parameter values for a parameter in the
+XML with a matching query id and param number.  A misfeature - get around it
+by editing xml_query_params_to_allparams and saying that if
+$param_hash->{option} and $param_hash->{menu_query} are both empty then set
+$param_hash->{option} to an empty list, blocking the database lookup
+
+Note that a query with no parameters may still pick up the parameters from the
+database-defined query with the same number, but this is less weird and easier
+to spot.
+#### No - this is rubbish, because if I define some default queries in the XML
+I can get a conflict with the database.  Why would I ever want to split the
+two?  FIXED 22/6
+
+On 10/5:
+
+Finished up testing linkouts and made a little script to receive and display
+the packed parameters - a useful default link target for testing.
+Added cache flag so that HTML templates will be cached if using
+Apache::Registry.  This can hog memory but is another time saving on top of
+mod_perl and Apache::DBI - speeeed!!!!.
+Added linkout support to debug mode.
+TODO (maybe) - Add a second packer module, GenQuery::Util::GenBankPacker which
+knows how to sort and pack list of accessions.  Rip off code from
+~/perl/gbaccstohtml.perl.  This could then be used for linkouts to GenBank.
+
+On 16/5:
+
+Thoughts on paging.  Could do it heuristically - if the (processed) query
+begins with 'select' then trim off any trailing semicolon and add LIMIT 2001.  
+(extra row so I know whether to page or not).
+That saves pulling back everything for the display, but will bork if there is
+already a LIMIT clause and break linkouts that want to see everything.  
+Also I won't know how many actual rows there are which precludes "page 1 of 4,
+items 1-50 of 312" type info being displayed.
+There is a corresponding OFFSET to go with LIMIT, so (in PG at least) 
+if you can do LIMIT you can do paging a similar way.
+
+Likewise ORDER BY will fail if there is already such a
+clause.  Making paging robust would require an extra page flag.  Making
+ordering robust would require an extra entry column 'order_by' so that we
+could have a default order or use the widgets or else the parser to recognise
+and pull out the "ORDER BY" clause.  That might work...
+
+So current thoughts:
+Order by - do implicitly by detecting and modifying ORDER BY clause if found,
+or adding one.
+Have global flag to turn the feature off, but it shouldn't be too invasive as
+default order will leave query unmolested.  Need to look at non-select
+commands (eg. show tables) in mysql - do these allow an order?
+Paging - add a column for paging in query_defs.  If 0, default behaviour
+occurs.  If >0 paging will happen with that number of rows per page.  If
+negative, the user will be prompted with an extra parameter 'results per
+page'.  Genius.
+
+On 2/7:
+
+Right, time for some more GQ after far too much Tomcat stuff.  Had a look into
+Bela's various problems and I can't reproduce them :-/  Need to get Bela to
+set up GQ on a machine I can do debugging on a machine I can do debugging on
+(grevling?).
+
+I want to add the feature where 'ALL' can be suppressed for any parameter, as
+it is not always appropriate.  
+
+1) Add 'suppress_all' boolean default false to the parameters table.
+
+2) Modify code to use that and matching XML element.
+
+3) Also let the code tell the user if the table needs updating.
+
+For multi-selects this will have no effect.  The GenQuery administrator is
+free to interpret an empty selection as either all or nothing by use of
+optional sections.
+
+### Done!
+
+On 3/7:
+
+Right - I still need to get on with the collections interface in HB, but for
+now I'm going to have a crack at some web services.  Primed by my experience
+with eXist I should be able to get this going.
+
+Advice from Giles:
+1 - Talk to him about what I'm doing.
+2 - Make it function-rich (as was my plan)
+3 - Giles mentioned some standard for complex calls/returns - what was it?
+4 - SOAP is prefered to XMLRPC, but I should see what Taverna supports
+
+I had some thoughts on web services above.  This is probably overcomplicated,
+and I could do without having to maintain server state, but maybe that is
+unavoidable.  If supporting authentication I'll need to maintain sessions
+somehow.
+
+So the plan:
+A)
+Deploy a trivial web service on texugo that finds prime factors of a number.
+Takes an integer, throws an error if it is less than 2, returns a sorted array
+of factors.
+
+Do this neatly as XMLRPC and SOAP for demo purposes.  Make a client to call
+both versions.
+
+## SOAP service and client made, now for Taverna.
+
+B)
+Call this from Taverna on wootz
+
+C)
+Sort out making a service that returns a table
+
+D) Revisit all the complex stuff, authentication, updates, WSDL etc. etc.
+
+E)
+erm... Profit?
+
+On 4/7:
+
+Talked to Katie from MyGrid and mentioned GenQuery, got some names of people
+and her advice to use soaplab for prototyping WSDL.  I'm going to ignore that
+and use Axis, the plan being to write stub a stub Java class, use Axis to make
+the WSDL and then have Perl emulate what the Java web service was doing.
+
+For the factoriser I'm actually going to write a working Java class, to test
+the full Axis thingummyjobby.
+...reasonable progress on this.  See progress.txt in ws_test
+
+On 12/7:
+
+Trying to get the documentation together for GenQuery2 v1.0.  Also trying to
+track down Belas bugs:
+
+1 - Logout button appears with text.  Only on old Konqueror but probably
+affecting IE as well.  Looks like the previous CSS button glitch.
+Nope - it was because I'd put / in the button tag, making it an empty tag.
+
+2 - With cookies on, cookies apparently being lost and error being reported
+for invalid database type - unable to reproduce. (!?)
+
+3 - With no prompts set, login failing with blank page.  Was due to corrupt
+XML, with nested comments being parsed regardless.  It appears the newer LibXML detects this properly,
+so I'll not apply extra checking in the code.
+
+Also noticed that on pivotqueries the wrong column name was being picked up
+and given the selected flag - fixed.
+
+On 8/8:
+If a menu_query is specified for a parameter that is a text field it was previously
+ignored and a blank box was shown.  Now the contents of the text box will
+default to the first item in the results.  This is of limited use but it is
+probably closer to expected behaviour, and adds virtually nothing to the code.
+
+Another thought on linkouts.  Rather than all the complex machinery that
+gathers a column into a link, how about this:  add a new special column
+header, <checkbox.  This will generate something like:
+
+<label><input type="checkbox" name="bar" value="foo"/>foo</label>
+
+Where foo (the label) is the first column and bar (the form param) is the second.  Now if the results table
+is wrapped in a form, this allows the column values to be selected.  Now if
+the value of query_url is passed through to the template, the template author
+does not need to know the form target, just supply a generic <form
+method="POST" target="<TMPL_PARAM NAME="QUERY_URL">"> and a submit button et
+voila.
+I need to work out how I make all the values checked by default (eh? that's
+not difficult!).  Also, is
+there any sensible way to supply a label for the submit button without adding
+another column to the table or cramming it in with the URL or just leaving it to the template author?
+Hmmm.
+
+Also, what about the equivalent but with pivoting?  Is it possible?  If I put
+the name of a query in the query_url it could be transmuted into an internal link, but
+if I want to use POST rather than GET
+then to add form parameters onto it and reconstruct the query I'd need to pick
+up both URL values and POST-ed values.  I generally avoid this entirely to
+avoid picking up junk from the URL. I could either:
+
+1) Generate the URL then do something crufty to tell the next call to read it
+2) Generate a super submit button with all the hidden state fields.
+3) Have a cuppa and mull it over.  The second option seems preferable - have
+the submit button be LINKOUT_SUBMIT and the query_url map to LINKOUT_URL.
+Both will be blank unless a query_url is set.
+
+Also do the <image heading at the same time.  The first column will be used as the ALT
+text, the second should be the URL of the image.
+
+On 26/9:
+Realised that _escape on ResultTable was spitting warnings on undef -
+should return undef without any warning.
+Re-hacked the cpaninstall.perl script so it may have worked for Nathan (or
+maybe not?)
+Added '1' to the database connection routine so you can actually log into a
+MySQL database - tested on Meles.
+
+Download as FASTA.  This is wanted by several people, and the logic is
+reasonably simple.  Take all but the last fields, join them with spaces
+(or something) and then use that as the header.  Dump the last field as the
+sequence.  Don't bother validating anything - if the last column is not a
+sequence then so be it.
+The question is, how do I put a switch in the template so that I can only show
+a FASTA download link on certain queries?  This is related to producing
+linkout links...  hmmm, I just can't see a way to do it without futzing it or
+adding yet another column to the database, so leave it for now.
+
+On 27/9:
+
+Putting in the <checkbox code described above.  I can probably rip out the
+LINKOUT stuff now as this does the same thing without the extra table.  The
+parementer packing is redundant if I can now use POST requests.  On the other
+hand, the old mechanism does make the templates simpler and it does give more
+flexibility, so maybe leave it in for now just in case.
+
+Further thoughts.  To match the logic of the pivot queries the name of the
+parameter controlled by the checkbox group should come from the column name.
+This being the case I get the next column spare, so I may as well use this as
+the value - ie the thing you select is not necessarily the thing you see.  In
+pivotqueries this can be done by feeding a hidden column but here that won't
+work.  Putting the link URL in this column makes no sense as this is a property
+of the query not the row - hence why I'm using query_def.query_url.
+
+On 19/9:
+
+Spotted that for some queries the CSV download was only seeing the first row.
+Turns out that I'd duplicated the code that feeds parameters to a query by
+cutting and pasting, and one version was wrong.  Shunted duplicate code into a
+subroutine and fixed.
+
+On 2/11:
+
+Been working on the query loader.  This allows you to quickly list queries,
+dump, load and edit query bodies from the command line.  In advanced mode you
+can export queries as XML in the format used by the config file and re-import the XML.
+
+Note - due to use of [;<>"'] in queries it makes sense to wrap some text in
+CDATA sections to aid editing.  Check that XML::Simple is happy to read these as regular
+text.
+
+On 8/11:
+
+Realised that the date picker should be able to pick up the value from
+menu_query and use that to set the datae that appears when first clicked.
+Note that this requires a bugfix to the actual date picker!  See my note in
+the code.
+
+On 16/11:
+
+Further to my thoughts on paging from 16/5.  It is possible to use cursors in
+PG by creating them manually:
+
+declare curs1 cursor with hold for select * from handlebar_sys.barcode_user;
+fetch 3 from curs1;
+close curs1;
+
+Leaving out the 'with hold', I need to be in a transaction block.
+The need for a transaction can be tricky for some uses but since I never write anything in
+GQ I could get away with it.
+
+This doesn't help me to find out how many rows I got back, but I could
+possibly try and be really cunning and hold a cursor between requests so I
+only have to make a query once.  This does mean holding the connection open
+and retrieving it on the next request, and I have no way to clean up old
+cursors, so it would not be easy.
+
+Going back to the 'LIMIT/OFFSET' idea, I previously said that this would be
+awkward because if the query already contained a limit or offset I couldn't
+add a second.  There is a standard way round this, by making the query into a
+subquery and doing, eg:
+
+select * from (
+select x, y from handlebar_sys.barcode_deletion order by barcode desc
+) as query order by 2 asc limit 10
+
+Now my sorting overrides the previous sorting and I don't have to worry about
+existing limit clauses in the query.  I just have to make sure the query
+begins with "select".
+
+I think the cursor approach is probably a good bet for fetching as it lets me pull
+data in chunks, avoiding timeout issues.  The subquery approach will let me do
+sorting and can be combined with the cursors.  The subqueries work for MySQL
+but the cursors will probably not.
+
+On 8/1:
+
+Right, I'm back and I'm going to add the ability to expand all the submenus at
+once.  This can be used as a navigation feature but it also allows you to lock
+the menus open and thereby use the category headers as titles/separators with
+no associated button.  In fact, why not change the whole thing so that you
+toggle the menus open and closed rather than having just one open?
+
+Corresponding tag in config file will be "expand_all" and will be ignored if 
+"only_category" is selected.  Otherwise it can be (yes/no/always) to determine
+if the expansion will be by default or all the time.
+
+Need to save a list of "expanded" categories in MENU_AND_CONNECTION_STATE.  Do this
+by number rather than by title.  If nothing is open save '-'.  To open
+everything save '*'.  When starting up:
+
+If expand_all is 'always' then set the list to everything.
+If the list is empty and expand_all is yes then ditto.
+If the list is empty and current item is set then use that.
+If the list contains a - then set the list to nothing.
+If the list contains a * then set the list to everything.
+Ensure the list is sorted, unique integers and contains the current item.
+
+Need to keep a current menu as well, for the single menu mode.
+I either could have this independent, or say that the current menu is always
+expanded.  Either is fiddly, but the latter seems more sensible, so:
+
+- When showing the menu tree, the current menu is always expanded.
+- If the list of expanded menus is defined, the current menu is added to that
+  list and saved
+- When a menu is collapsed, if that was the current menu then the current menu
+  is set to undef
+- When a menu is expanded, the current menu is set to that one
+
+OK... Fiddly to program but at least I know where I'm going.
+
+On 14/1:
+
+The scheme as described above is implemented.  The new expand_all option can
+have the following values:
+
+always - Menus will be opened out fully at all times
+yes - Menus will initially be open but you can toggle them open and closed
+never - Original mode - only 1 or 0 menus open (note: you can force in expanded=*)
+no (default) - Menus will initially be closed but you can toggle them open and
+closed
+
+GenQuery 2.1.2 !
+
+On 25/1:
+
+I've promised the MM people that they will get graphs.  How can I do this?
+I've already got an issue with the export formats, that if one query allows a
+FASTA export then you have to put a "download as FASTA" link on every page and
+you can download everything in FASTA format, which is a bit silly.
+
+Also, currently if the MIME type matches /text/ you get the results appearing
+in the browser and otherwise you get prompted to save the file.  It might be
+nice to allow this to be configured in the iterface - ie. by determined by the
+parameters you pass.
+
+So, for each query, I want a list of valid output formats.  This will just be
+a hint to show certain links, so for eg. if the list contains FASTA I'll
+generate a 'Download as FASTA' link.  If someone makes their own link they
+could still download an arbitrary query as FASTA.
+
+Now for graphs, I want the graph to appear embedded in the results page.  This
+entails either making it in JavaScript or on the server and imbedding an image.  
+The latter is pretty easy - I create an exporter module that makes the graphs
+(using libgd-graph3d-perl) and then link it inline instead of as a clickable
+hyperlink.
+
+So now I need a way to describe what graphing options a query supports, and
+possibly to pass extra parameters to the graph exporter aside from just the
+ResultTable object - eg. formatting hints.
+
+So, what graphs might I support:
+
+- pie chart from two columns (label + value)
+- bar chart from 2+ columns (as per pie)
+- scatter plot (points) with two numeric columns
+
+I think it makes sense to deal with graphs explicitly rather than abstractly,
+and therefore have another state - 'show_graph' - with its own template
+'graph_template.html'.  As before this could simply import results.template,
+and have a <TMPL_IF NAME="SHOWING_GRAPH"> to include the link:
+
+<TMPL_IF NAME="SHOWING_GRAPH>
+
+<img src="<TMPL_VAR NAME='GRAPH_LINK'>;width=200;height=200" alt="graph"
+     width="200" height="200"/>
+
+</TMPL_IF>
+
+Voila - the size of the graph is controlled by the template.
+
+Now for the list of download formats I'd suggest a new column on the query
+table - 'export_formats'.  There will be a corresponding default
+'export_formats' in the config file, or the hard-coded default will be
+'html;csv'.  All graphs will be named 'graph_pie', 'graph_bar' etc.  I'll code
+a hash of {abbreviation=>real name} into ResultTable and so be able to say:
+
+<TMPL_LOOP NAME="EXPORT_FORMATS">
+<a href="<TMPL_VAR NAME="EXPORT_LINK">>
+Show results as <TMPL_VAR NAME="EXPORT_LONG_NAME">
+</a>
+</TMPL_LOOP>
+
+5/2/08
+
+Right, let's do it.  Battle plan:
+
+1 - Add export_formats column.
+2 - Read this, along with XML, XML defaults and hard-coded
+3 - Add the EXPORT_FORMATS loop as shown above
+4 - Add the showing_graph state and add graph awareness to the default
+template
+5 - Consider how debug mode iteracts - always HTML view
+
+Random TODO - kill the linkouts cruft, once I'm happy that the simpler linkout
+schem is going to work.
+
+On 12/2:
+
+Yesterday I fixed a bug in QueryCollection::get_by_category where the
+query_db_map was not being copied to the new object.  Fixed, but note that as
+I only copy the reference, if I were to maintain both collections and add
+queries to one it could mess up the other.  I'm very unlikely to do this, so
+I'll leave the bug for now.
+
+Seem to be ready to put this out on the Envgen.  Will do that now, running
+experimental GQ under ~/GenQuery_beta_for_mm.  I can't upgrade the core GQ
+until I either add export_format columns to all the query_def tables or else allow GQ to
+run without that column.
+
+On 13/2:
+
+While waiting for non-munged files from Lindsay, I'm going to code the pie
+chart exporter.  I'm going to use Ronny's data since there is more to get my
+teeth into.  See ronny_notes.txt.
+
+On 14/2:
+
+Right, I seem to have a lot of interesting ideas relating to envbase that I'd
+like to explore.  Maybe I should do the graphical/web-based setup tool but
+then I find that query_loader.perl does what I need.  I just modified it to
+deal with multiple databases and to enable params to be provided via the
+environment - eg:
+
+env gq_0_db_user=me ./query_loader.perl -d 0 list
+
+Also I note that my mini-patch to Proc::InvokeEditor has now made it to Lenny.  A
+Lame to Fame indeed!
+
+Right, the next exciting thing is to support
+not-fetching-all-the-results-at-once (TM).  Now paging is hard because it
+means complicating the interface and being able to page backwards and
+forwards.  It's doable but a pain (see notes some time ago).  What I do want 
+to be able to do is have a resultset that fetches results a chunk at a time.
+That way if I have a big result set I don't need to fetch 10000 rows to show
+the first 2000 and if I'm downloading the whole thing I can stream it rather
+than fetching everything in one go.
+
+Problems:
+
+This is database specific so I need to ensure I don't break stuff for MySQL
+
+QueryInstance::execute needs a stream flag - no, it should live in ignorance!
+selectall_gq needs to be able to start a cursor fetch
+ResultTable needs to be able to receive this cursor (or rather a ref to
+DBConnection) to set up streaming mode
+DBConnection needs to be able to return data in chunks by holding onto the
+cursor
+
+All that is reasonably easy, and will fix the 2000 row html speed issue!
+
+For CSV (FASTA etc) export
+CGI::Application expects the whole response to be built in memory.  A
+workaround is to use CGI::Application::Plugin::Stream; this wants a
+filehandle, so:
+Export plugins supporting streaming need to emulate a filehandle (see perltie).
+Once the plugin is set up it will be passed to 'stream_file'.
+
+Problem is that implementing this interfece is a PITA and there may well be
+buffering issues.  Best to write my own plugin based on Stream, I would think.
+
+On 18/2 : No progress with buffering but I have fixed some bugs in the query
+loader.  Eg. if qedit fails it now barfs out the XML so you don't just load
+it.  Also deals with loading parameters without IDs
+
+On 20/2 : The query loader can now renumber all queries to be 10,20,30 etc.
+Which is handy if you need to re-order them.  Can also sort list of queries
+into display order.
+
+What was I thinking of with '<passparam'??  I clearly had a good idea but
+never implemented it.  Was this just to be a hidden version of checkbox where
+the parameter always got set?  Most probably - TODO - implement and document.
+
+Back to streaming.  Maybe I can write my own plugin for CGI::Application.
+Rather than wanting a filehandle this takes an object reference and calls
+'dump_to_fh' on it.  This routine will then just print to the file handle.
+Looking at Plugin/Stream, it doesn't actually do anything special, so perhaps
+I can just get away with printing the stuff directly even though I'm using
+AGI::App?  Later...
+
+TODO - set GENQUERY_VERSION into the templates.  Could be handy.
+
+Note on 9/7 - pushed out new version of GQ to package repo as I realised the
+code was out of date and I was still using a pre-release version for the
+Bergen database.  2.2.3.
+
+Note on 16/9/10:
+
+I've been trying to fix unicode again.  It should be simple as the database,
+browser, development system and Perl are all working in Unicode by default.
+Currently, in UTF-8 mode, the code does the following:
+1) Adds a charset:utf-8 header
+2) sets binmode STDOUT ':utf8'
+3) runs _fix_utf8_query_params
+4) doesn't set client mode for the database to utf-8 (as this is the default)
+5) sets pg_enable_utf in the database handle
+
+Note that if (2) is not done then &nbsp; turns into a random unknown
+character.
+
+As a basic test I tried using the "run arbitrary query" mode to run "SELECT
+'xxx'" where xxx is some awkward unicode-type string.  The result in the table
+appears to have been doube-encoded.  Fortunately, the behaviour looks identical
+when using gq_rerun so I can get the debugger on the case...
+
+OK, I wrote a test script (/home/tbooth/public_html/cgi-bin/pgutftest.cgi)
+that reveals the problem.  As one might suspect, the string goes off to the
+database with the UTF8 flag set.  This protects it from double-encoding.
+However, what comes back does not have the flag set so if gets double-quoted
+by the output.  Everything else seems to be working ok (!?).
+
+So, I either need to make 'pg_enable_utf' do it's job or else I need to use
+the wrapper script suggested at the end of 'man perlunicode'.
+
+OK, it seems that 'pg_enable_utf' will only act if the database tells it the
+data coming back is of type TEXT or similar.  This query will demostrate the
+issue (note - if the below looks garbled you've either garbled this file or
+are reading it in a non-unicode editor or don't have the necessary font support):
+
+select 'μπΪϾΘԀЄ ☺☻☺' as fail, 'μπΪϾΘԀЄ ☺☻☺'::text as success;
+
+I could add 'use utf8' pragma to my code, but there should be no quoted
+strings in the source that are ambiguous.  To quote a string I can do:
+
+perl -CA -e 'use Data::Dumper; print Dumper(@ARGV)' "here is μπΪϾΘԀЄ ☺☻☺"
+
+Maybe it would just have been easier to regard everything as binary data, and
+not add any UTF-8 stuff at all.  This would mean any support for not-UTF8
+browsers was broken but who the hell uses such things nowadays anyway?
+
+On 13/1/11:
+
+Just when you thought it was safe to call GenQuery a done deal for a while...
+
+So, we have 2 bugs, an easy one and a hard one:
+
+Hard) Visit:
+
+http://nebc.nerc.ac.uk/cgi-bin/gq_hsmesocosm/gq.cgi?qp_DB=RDP_10.19;qp_ALGID=21;queryid=40;rm=results#results
+
+Click "list" in top row
+Click "Show sequences" button.
+Click "Results as multi-FASTA sequence file" -> URL too long
+
+First problem is that we only pick up the first 2000 sequences (there are 7000
+in the query) and the second problem is the URL length limit.  I had a look at
+improving the URL limit with the Util::ParamPacker module but this doesn't
+help (gives a little more leeway only).  Came to the conclusion the use of
+linkouts is just not right here.  Query 40 needs yet another per-row link -
+"get sequences" that shows you the FASTA right away based on the consensus ID
+and cluster scheme.  This makes sense to have in any case, under sequences.
+
+It may well be possible to bypass the URL length limit with cunning JavaScript
+that forces a page POST rather than a GET when the onClick event is fired.
+But I think this is more of a workaround than a real fix in any case and I
+don't like JavaScript shenanigans.
+
+Easy [I hope]) 
+
+Go to "Run arbitrary SQL query" and type a multi-line query, eg:
+
+"select 
+1;"
+
+Run it and click the permalink to get something like:
+
+http://nebc.nerc.ac.uk/cgi-bin/gq_hsmesocosm/gq.cgi?qp_SQL=select%0D%0A1%3B;queryid=100;rm=results
+
+Now go to "Count families by cluster" and run with default parameters.
+
+Now click "list" in the top line.
+
+The link is:
+
+  http://nebc.nerc.ac.uk/cgi-bin/gq_hsmesocosm/gq.cgi?qp_SQL=select%0D%0A1;;queryid=100;rm=results?qp_ALGID=21;qp_FAM_COUNT=39;qp_LIST=list;rm=results;qp_LIST_SEL=1;qp_SUMMARIZE=summarize;queryname=Get%20classification%20for%20cluster;qp_SEQID=FSRZL8L04H6L46;qp_CLUSTER_SIZE=7317;qp_DB=RDP_10.19#results
+
+And the error that comes back is:
+
+  No such run mode 'results?qp_ALGID=21' at /usr/lib/cgi-bin/gq_hsmesocosm/gq.cgi line 75
+
+OK, so the URL has been mis-generated at ResultTable.pm line 383.  This
+appears to be a bug in CGI.pm not making the relative link correctly where
+there is a newline in the (redundant) URL parameters - they are supposed to be
+clobbered but they hang around.
+
+Can't really blame CGI.pm as this is a fairly pathological case.  It appears
+to have been fixed between CGI.pm versions 3.38 (on Envgen) and 3.43 (on
+Barsukas) so I'm going to ignore this and make a note in the code.  Upgrading
+on Envgen doesn't look easy, sadly, and there is no obvious workaround.
+

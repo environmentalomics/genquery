@@ -1,0 +1,14 @@
+CVS
+genquery_conf.xml
+genquery_conf_[a-c]*.xml
+genquery_conf_[e-z]*.xml
+genquery_*_conf.xml
+gq.cgi
+template[._]*
+www/amo*
+ws_test
+*_old_*
+*.gz
+*.deb
+bio-linux-genquery*
+genquery-src
